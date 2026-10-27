@@ -1,0 +1,26 @@
+{
+  "case_id": "synthetic-ankle-001",
+  "subject": {"local_alias": "LOCAL-SELF-001"},
+  "facts": [
+    {
+      "semantic_type": "EXPOSURE",
+      "field_name": "actual_weight_bearing",
+      "side": "RIGHT",
+      "episode_id": "episode-index-fracture",
+      "epoch_id": "epoch-index-orif",
+      "effective_at": "2025-02-15T09:00:00+09:00",
+      "value": {"side": "RIGHT", "status": "FULL_WEIGHT_BEARING"},
+      "high_impact": true
+    },
+    {
+      "semantic_type": "SYMPTOM",
+      "field_name": "ankle_pain",
+      "side": "RIGHT",
+      "episode_id": "episode-index-fracture",
+      "epoch_id": "epoch-index-orif",
+      "effective_at": "2025-02-15T09:05:00+09:00",
+      "value": {"side": "RIGHT", "severity_0_10": 3, "location": "ANTERIOR"},
+      "high_impact": true
+    }
+  ]
+}

@@ -1,0 +1,28 @@
+# Local case data, model credentials and generated outputs
+.medic/
+medic-data/
+records/
+reports/
+model-registry.json
+.env
+.env.*
+*.pem
+*.key
+*.dcm
+*.dicom
+*.nrrd
+*.nii
+*.nii.gz
+*.zip
+*.iso
+# Python tooling
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+dist/
+build/

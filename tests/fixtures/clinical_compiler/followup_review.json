@@ -1,0 +1,8 @@
+{
+  "reviewer": "LOCAL_USER",
+  "decided_at": "2026-08-18T12:05:00+09:00",
+  "decisions": [
+    {"candidate_id": "candidate-d71d0859fc39f9757c44bf892812af81e19b379eee363607e1f09956ad9d7348", "status": "CONFIRMED"},
+    {"candidate_id": "candidate-14c899f8f500d5b0248f7cc1fa5950aa258fa9117eee64c2e3a5028bf0e9fc49", "status": "CORRECTED", "corrected_value": {"side": "RIGHT", "severity_0_10": 2, "location": "ANTERIOR"}}
+  ]
+}

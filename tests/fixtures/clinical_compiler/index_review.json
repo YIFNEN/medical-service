@@ -1,0 +1,9 @@
+{
+  "reviewer": "LOCAL_USER",
+  "decided_at": "2026-08-18T12:00:00+09:00",
+  "decisions": [
+    {"candidate_id": "candidate-359f3b3f14530703367b6b952b4823477727f5b6ceff9c709e03ae8d10b4bc37", "status": "CONFIRMED"},
+    {"candidate_id": "candidate-d8c9e7969fd21205260c1135a9176b059fc4b8910743b576bd9d8ba4d27e4bf9", "status": "CONFIRMED"},
+    {"candidate_id": "candidate-3af99375527f11d3b0118f26dade40394e3343511d29179c7df979d1058f857a", "status": "CONFIRMED"}
+  ]
+}

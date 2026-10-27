@@ -1,0 +1,60 @@
+{
+  "case_id": "synthetic-ankle-001",
+  "subject": {
+    "local_alias": "LOCAL-SELF-001"
+  },
+  "facts": [
+    {
+      "semantic_type": "INJURY",
+      "field_name": "index_injury",
+      "side": "RIGHT",
+      "episode_id": "episode-index-fracture",
+      "epoch_id": "epoch-index-orif",
+      "effective_at": "2025-01-01T09:00:00+09:00",
+      "value": {
+        "side": "RIGHT",
+        "pattern": "TRIMALLEOLAR_FRACTURE_DISLOCATION"
+      },
+      "high_impact": true
+    },
+    {
+      "semantic_type": "PROCEDURE",
+      "field_name": "index_orif",
+      "side": "RIGHT",
+      "episode_id": "episode-index-fracture",
+      "epoch_id": "epoch-index-orif",
+      "effective_at": "2025-01-02T13:00:00+09:00",
+      "value": {
+        "side": "RIGHT",
+        "procedure": "ORIF",
+        "fixation_construct": "PLATE_AND_SCREWS"
+      },
+      "high_impact": true
+    },
+    {
+      "semantic_type": "OBSERVATION",
+      "field_name": "postoperative_alignment",
+      "side": "RIGHT",
+      "episode_id": "episode-index-fracture",
+      "epoch_id": "epoch-index-orif",
+      "effective_at": "2025-01-02T16:00:00+09:00",
+      "value": {
+        "mortise": "MAINTAINED",
+        "source_modality": "XR"
+      },
+      "high_impact": true
+    },
+    {
+      "semantic_type": "REQUEST",
+      "field_name": "weight_bearing_prescription",
+      "side": "RIGHT",
+      "episode_id": "episode-index-fracture",
+      "epoch_id": "epoch-index-orif",
+      "effective_at": "2025-01-02T17:00:00+09:00",
+      "value": {
+        "status": "NON_WEIGHT_BEARING"
+      },
+      "high_impact": false
+    }
+  ]
+}
