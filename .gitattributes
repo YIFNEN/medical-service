@@ -1,0 +1,3 @@
+# Source hashes in synthetic review fixtures depend on exact bytes.
+# Preserve LF on Windows checkouts as well as on other platforms.
+* text=auto eol=lf
