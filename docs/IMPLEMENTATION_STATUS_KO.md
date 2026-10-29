@@ -5,7 +5,7 @@
 
 | 단계 | 상태 | 증빙·잔여 |
 |---|---|---|
-| M0 | 오프라인 검증 | 설정·견적·doctor·구버전 manifest 보존; 全回帰 최종 실행 확인 필요 |
+| M0 | 오프라인 검증 | 설정·견적·doctor·구버전 manifest 보존; 전체 회귀 353개 통과 |
 | M1 | 실제 검증 대기 | smoke·재개 구현, SDK 합성 시험; 키·모델/가격·별도 비용 승인 필요 |
 | M2 | 오프라인 검증 | 목록 가져오기·개인 조건·부분 날짜·의미·stale·환자 충돌 방지 |
 | M3 | 구현 중 | 질문·주장·행동 연결 및 사용 자격 구현; 독립 검토 지적의 추가 회귀 확장 필요 |
@@ -18,7 +18,7 @@
 
 - 2026-10-30: `scripts/checkpoint.ps1`은 작업 단위별 전체 합성 시험→명시적 코드 경로 staging→commit→push를 수행한다. GitHub Actions는 push/PR에서 합성 시험과 모듈 CLI를 실행하고 JUnit 증빙을 남긴다. 개인 저장소·API 키는 CI에 전달하지 않는다. 자동 merge는 하지 않는다.
 - 2026-10-29: 현재 코드로 Slicer 5.12.4 합성 왕복 PASSED. 거리 12.041594578787716mm, 각도 90°, 부피 575.9999999986871mm³, 평가 영역 6911.999999984245mm³, 비율 1/12. 좌표 허용오차 1e-6, 픽셀 순서 및 측정 ID·이름·방법 보존 확인. 임상 정확도와 사람의 기준점 정확도 증거는 아니다.
-- 2026-10-30: 중단된 회귀 8건은 환자 프로필과 별도 사실의 교차 환자 연결 방지 테스트였다. 수정 후 관련 62개 통과. 전체 회귀 및 원격 CI 결과는 다음 체크포인트에서 확인한다.
+- 2026-10-30: 중단된 회귀 8건은 환자 프로필과 별도 사실의 교차 환자 연결 방지 테스트였다. 수정 후 관련 62개 통과. 전체 회귀는 **353 passed, 1 skipped, 132 subtests passed**. 체크포인트 스크립트에서도 동일 결과를 확인하고 `fe2317b`를 `codex/cli-prototype`에 푸시했다. 원격 증빙: [Actions 실행](https://github.com/YIFNEN/medical-service/actions/runs/40905331492). 실행 상태는 링크에서 확인한다.
 
 - 2026-10-29: 공개 코드 기준 `D:\Medic\publish\medical-service`, 시작 커밋 `3da5b3e`, 개발 브랜치 `codex/cli-prototype`. 기존 개발 tree와 개인 저장소 보존.
 - 2026-10-29: 기존 프로젝트 가상환경으로 기준선 `python -X utf8 -m pytest -q`: **196 passed, 1 skipped, 57 subtests passed**, 30.10초. Windows symlink 시험 skip와 pynrrd deprecation 경고 1건. 기본 시스템 Python에는 의존성이 없으므로 기존 가상환경 사용.
