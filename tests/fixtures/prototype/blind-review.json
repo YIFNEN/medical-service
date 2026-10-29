@@ -1,0 +1,9 @@
+{
+  "schema_version": "medic-blind-approval/1",
+  "case_id": "ANKLE-PILOT-001",
+  "reviewer": "synthetic-operator",
+  "reason": "SYNTHETIC visibility example; review and adapt to each real input",
+  "questions_reviewed": true,
+  "profile_items": ["symptoms:pain", "function:walking", "activity:daily_activity", "goals:desired_outcome", "priorities:priority"],
+  "imaging_review_ids": []
+}

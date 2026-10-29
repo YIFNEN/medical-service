@@ -12,16 +12,22 @@ class EvidenceAppraisal(StrictFrozenModel):
 
 
 class EvidenceAppraiser:
-    def __init__(self, gateway, ledger, registry=None):
+    def __init__(self, gateway, ledger, registry=None, settings=None):
         self.gateway, self.ledger, self.registry = gateway, ledger, registry
+        from .settings import ProcessingSettings
+        self.settings = settings or ProcessingSettings()
 
     def appraise(self, card, patient_context, estimate):
         if card.access_level != 'FULL_TEXT':
             result = self._appraise_single(card, patient_context, estimate)
             return result.model_copy(update={'analysis_scope': card.access_level if card.source_text else 'UNREVIEWED'})
-        chunks = [(start, card.source_text[start:start + 20000]) for start in range(0, len(card.source_text), 20000)]
+        size = self.settings.fulltext_chunk_chars
+        limit = self.settings.fulltext_max_chunks
+        chunk_count = (len(card.source_text) + size - 1) // size
+        chunks = [(start, card.source_text[start:start + size])
+                  for start in range(0, min(len(card.source_text), size * limit), size)]
         results, support = [], []
-        for start, text in chunks[:12]:
+        for start, text in chunks[:limit]:
             passages = tuple(p.model_copy(update={'start': max(p.start, start) - start,
                 'end': min(p.end, start + len(text)) - start,
                 'text': card.source_text[max(p.start, start):min(p.end, start + len(text))]})
@@ -36,10 +42,10 @@ class EvidenceAppraiser:
                     'source_locator': locator, 'source_sha256': card.source_sha256}))
         if not results:
             return card.model_copy(update={'appraisal_status': 'NO_CONTENT'})
-        complete = len(chunks) <= 12 and card.fulltext_status == 'ACQUIRED'
+        complete = chunk_count <= limit and card.fulltext_status == 'ACQUIRED'
         updates = {'field_support': tuple(support), 'appraisal_status': 'APPRAISED',
                    'analysis_scope': 'FULL_TEXT' if complete else 'PARTIAL_FULL_TEXT',
-                   'analyzed_locators': tuple(f'text:characters:{start}-{start + len(text)}' for start, text in chunks[:12])}
+                   'analyzed_locators': tuple(f'text:characters:{start}-{start + len(text)}' for start, text in chunks[:limit])}
         for name in ('study_design', 'population', 'intervention', 'comparator'):
             updates[name] = '; '.join(dict.fromkeys(f.value for f in support if f.field == name)) or (
                 'not reported in accessed text' if name in ('study_design', 'population') else None)

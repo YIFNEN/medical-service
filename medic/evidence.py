@@ -102,6 +102,13 @@ class EvidenceBundle(StrictFrozenModel):
                     "pmid": next((item.pmid for item in candidates if item.pmid), None),
                     "doi": next((item.doi for item in candidates if item.doi), None),
                     "pmcid": next((item.pmcid for item in candidates if item.pmcid), None),
+                    'publication_status': max((item.publication_status for item in candidates), key=lambda status:
+                        {'NOT_CHECKED': 0, 'SOURCE_CHECKED_NO_NOTICE': 1, 'CORRECTION_REQUIRES_REVIEW': 2,
+                         'EXPRESSION_OF_CONCERN': 3, 'RETRACTED': 4}[status]),
+                    'publication_updates': tuple({json.dumps(u, sort_keys=True): u for item in candidates
+                                                  for u in item.publication_updates}.values()),
+                    'publication_notice_reviewed': all(item.publication_notice_reviewed for item in candidates
+                        if item.publication_status in {'CORRECTION_REQUIRES_REVIEW', 'EXPRESSION_OF_CONCERN'}),
                 })
                 groups = [(ids, item) for ids, item in groups if not ids & keys]
                 groups.append((keys, merged))
@@ -119,6 +126,7 @@ def _design(values: Any) -> str:
 
 
 def normalize_pubmed(item: dict[str, Any], retrieved_at: datetime) -> EvidenceCard:
+    from .literature_integrity import publication_status
     pmid = str(item["uid"])
     doi = str(item.get("elocationid", "")).removeprefix("doi: ").strip() or None
     identity = {"source": "PUBMED", "pmid": pmid}
@@ -138,6 +146,9 @@ def normalize_pubmed(item: dict[str, Any], retrieved_at: datetime) -> EvidenceCa
         pmid=pmid,
         pmcid=next((str(a['value']) for a in item.get('articleids', []) if a.get('idtype') == 'pmc'), None),
         doi=doi,
+        publication_status=publication_status(item['_publication_updates'], item.get('pubtype', ()))
+            if '_publication_updates' in item else 'NOT_CHECKED',
+        publication_updates=tuple(item.get('_publication_updates', ())),
     )
 
 
@@ -227,6 +238,7 @@ class PubMedSource:
             params={"db": "pubmed", "id": ",".join(ids), "retmode": "json"},
         ).raise_for_status().json()["result"]
         abstracts: dict[str, str] = {}
+        updates = {}
         xml_response = get(self.client,
             f"{base}/efetch.fcgi",
             params={"db": "pubmed", "id": ",".join(ids), "retmode": "xml"},
@@ -239,11 +251,16 @@ class PubMedSource:
                 continue
             parts = ["".join(node.itertext()).strip() for node in article.findall(".//AbstractText")]
             abstracts[pmid_node.text] = " ".join(part for part in parts if part)
+            updates[pmid_node.text] = [{'relation': node.get('RefType'), 'pmid': node.findtext('PMID'),
+                                       'reference': node.findtext('RefSource'), 'note': node.findtext('Note')}
+                                      for node in article.findall('.//CommentsCorrections')]
         retrieved = datetime.now(UTC)
         cards = []
         for uid in ids:
             item = dict(payload[uid])
             item["_abstract"] = abstracts.get(uid, "")
+            if uid in updates:
+                item['_publication_updates'] = updates[uid]
             cards.append(normalize_pubmed(item, retrieved))
         return tuple(cards)
 
@@ -338,7 +355,10 @@ class OfficialLiteratureRetriever:
 class CitationGate:
     def __init__(self, cards: tuple[EvidenceCard, ...]) -> None:
         self.allowed = {card.evidence_id for card in cards if card.access_level != "CATALOG"
-                        and card.appraisal_status not in {"UNAPPRAISED", "NO_CONTENT"}}
+                        and card.appraisal_status not in {"UNAPPRAISED", "NO_CONTENT"}
+                        and card.publication_status != 'RETRACTED'
+                        and (card.publication_status not in {'CORRECTION_REQUIRES_REVIEW', 'EXPRESSION_OF_CONCERN'}
+                             or card.publication_notice_reviewed)}
 
     def validate(self, evidence_ids: Iterable[str]) -> None:
         unknown = sorted(set(evidence_ids) - self.allowed)

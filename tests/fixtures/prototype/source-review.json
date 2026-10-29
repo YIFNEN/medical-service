@@ -1,0 +1,8 @@
+{
+  "schema_version": "source-input-review/1",
+  "fact_id": "REPLACE_WITH_REVIEWED_FACT_ID",
+  "context": {"case_id": "ANKLE-PILOT-001", "patient_id": "SYNTHETIC-PERSON-001", "episode_id": "SYNTHETIC-EPISODE", "epoch_id": "SYNTHETIC-BASELINE", "anatomy": "ankle", "laterality": "right"},
+  "classification": "self_report",
+  "missingness": "present",
+  "dates": [{"role": "event", "precision": "month", "value": "2000-01"}]
+}

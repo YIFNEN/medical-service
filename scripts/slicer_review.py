@@ -7,6 +7,7 @@ All workspace/output directories must be local and beneath .medic.
 import json
 from pathlib import Path
 import tempfile
+import uuid
 
 from medic.inventory import digest, _linked
 from medic.slicer_review import review_template, validate_loaded_geometry, import_review
@@ -30,6 +31,21 @@ def _validate_volume(volume, geometry):
     volume.GetIJKToRASMatrix(matrix)
     validate_loaded_geometry(geometry, [[matrix.GetElement(r,c) for c in range(4)] for r in range(4)],
                              volume.GetImageData().GetDimensions())
+
+
+def validate_markup_binding(volume, node):
+    if (not volume.GetAttribute('Medic.SeriesUID') or not volume.GetAttribute('Medic.OriginalHashes')
+            or node.GetAttribute('Medic.SeriesUID') != volume.GetAttribute('Medic.SeriesUID')
+            or node.GetAttribute('Medic.OriginalHashes') != volume.GetAttribute('Medic.OriginalHashes')):
+        raise ValueError('markup must be explicitly bound to the selected source volume')
+
+
+def bind_markup(volume, node):
+    for key in ('Medic.SeriesUID', 'Medic.OriginalHashes'):
+        if node.GetAttribute(key) and node.GetAttribute(key) != volume.GetAttribute(key):
+            raise ValueError('markup is already bound to a different source volume')
+        node.SetAttribute(key, volume.GetAttribute(key))
+    validate_markup_binding(volume, node)
 
 
 def load_series(manifest, series_uid, workspace):
@@ -80,10 +96,17 @@ def export_review(manifest, volume, markup_nodes, output, segmentation=None, eva
     output = Path(tempfile.mkdtemp(prefix='review-',dir=output))
     review['markups'] = []
     for index, node in enumerate(markup_nodes):
+        validate_markup_binding(volume, node)
         kind = {'vtkMRMLMarkupsFiducialNode':'point','vtkMRMLMarkupsLineNode':'line',
                 'vtkMRMLMarkupsAngleNode':'angle'}.get(node.GetClassName())
         if kind is None:
             raise ValueError('unsupported markup node type')
+        measurement_id = node.GetAttribute('Medic.MeasurementID')
+        if not measurement_id:
+            measurement_id = 'measurement-' + uuid.uuid4().hex
+            node.SetAttribute('Medic.MeasurementID', measurement_id)
+        metadata = json.loads(node.GetAttribute('Medic.Metadata') or '{}')
+        annotation = dict(measurement_id=measurement_id, name=node.GetName(), metadata=metadata)
         points = []
         for i in range(node.GetNumberOfControlPoints()):
             if node.GetNthControlPointPositionStatus(i) != node.PositionDefined:
@@ -92,9 +115,10 @@ def export_review(manifest, volume, markup_nodes, output, segmentation=None, eva
             node.GetNthControlPointPositionWorld(i, point)
             points.append(point)
         if kind == 'point':
-            review['markups'].extend(dict(kind='point',coordinate_system='RAS',points=[p]) for p in points)
+            review['markups'].extend(dict(kind='point',coordinate_system='RAS',points=[p],
+                **{**annotation, 'measurement_id': measurement_id + '-' + str(i)}) for i,p in enumerate(points))
         else:
-            review['markups'].append(dict(kind=kind,coordinate_system='RAS',points=points))
+            review['markups'].append(dict(kind=kind,coordinate_system='RAS',points=points,**annotation))
         if not slicer.util.saveNode(node,str(output/f'markup-{index}.mrk.json')):
             raise ValueError('markup save failed')
     for role, node in [('manual_lesion',segmentation),('evaluation_roi',evaluation_roi)]:

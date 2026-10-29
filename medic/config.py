@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from typing import Literal
 from datetime import date
 from pathlib import Path
 
@@ -39,6 +40,10 @@ class CostEstimate(StrictFrozenModel):
     budget_usd: float | None = Field(default=None, gt=0, allow_inf_nan=False)
     approval_id: str = 'default'
     image_tokens_bound: int | None = Field(default=None, gt=0)
+    processing_settings: dict | None = None
+    question_count: int = Field(default=7, ge=1)
+    data_scope: Literal['PERSONAL', 'SYNTHETIC'] = 'PERSONAL'
+    transmission_approved: bool = False
 
     def approve(self) -> "CostEstimate":
         return self.model_copy(update={"approved": True})
@@ -211,11 +216,22 @@ class ModelRegistry(StrictFrozenModel):
         deliberation = self.estimate_deliberation_cost(input_tokens_per_call)
         return self._combine_cost_lines(extraction.lines + deliberation.lines)
 
-    def estimate_research_cost(self, input_tokens_per_call, evidence_limit=20, fulltext_limit=5):
-        if evidence_limit < 1 or fulltext_limit < 0:
-            raise ValueError('invalid literature limits')
-        base = self.estimate_deliberation_cost(input_tokens_per_call, evidence_limit)
+    def estimate_research_cost(self, input_tokens_per_call, evidence_limit=None, fulltext_limit=None,
+                               *, settings=None, question_count=7, clinician_comparison=False):
+        from math import ceil
+        from .settings import ProcessingSettings
+        values = (settings or ProcessingSettings()).model_dump(mode='json')
+        values.update({k: v for k, v in {'evidence_limit': evidence_limit,
+                                       'fulltext_limit': fulltext_limit}.items() if v is not None})
+        settings = ProcessingSettings.model_validate(values)
+        base = self.estimate_deliberation_cost(input_tokens_per_call, settings.evidence_limit)
         stages = (('decision_issues', 'anthropic', 4000),)
-        stages += tuple(('screening', 'anthropic', 6000) for _ in range(20))
-        stages += tuple(('fulltext_chunk', 'anthropic', 8000) for _ in range(fulltext_limit * 12))
-        return self._combine_cost_lines(base.lines + self._estimate_extra_stages(input_tokens_per_call, stages))
+        stages += tuple(('screening', 'anthropic', 6000)
+                        for _ in range(ceil(settings.screening_limit / settings.screening_batch_size)))
+        stages += tuple(('fulltext_chunk', 'anthropic', 8000)
+                        for _ in range(min(settings.fulltext_limit, settings.evidence_limit) * settings.fulltext_max_chunks))
+        if clinician_comparison:
+            stages += (('clinician_comparison', 'openai', self.synthesis_output_tokens),)
+        result = self._combine_cost_lines(base.lines + self._estimate_extra_stages(input_tokens_per_call, stages))
+        return CostEstimate.model_validate({**result.model_dump(),
+            'processing_settings': settings.model_dump(mode='json'), 'question_count': question_count})

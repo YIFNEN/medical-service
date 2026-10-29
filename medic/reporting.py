@@ -154,6 +154,9 @@ class ReportRenderer:
             degraded=degraded,
             research_trace=context.get('literature_review', {}),
             imaging_reviews=tuple(context.get('imaging_reviews', ())),
+            question_trace=context.get('question_trace', {}),
+            case_context=context.get('case_context', {}),
+            analysis_input=context.get('analysis_input', {}),
         )
 
     @staticmethod
@@ -180,6 +183,12 @@ class ReportRenderer:
             "## 3. 누락·충돌·불확실한 사실",
             "",
             _items(report.uncertainties),
+            '### 개인 조건·기록 의미 검수 버전',
+            _safe_text(json.dumps(report.case_context, ensure_ascii=False)),
+            '### 질문별 사용 자격·답변 상태 (구조적 검사와 임상 정확도는 별개)',
+            _safe_text(json.dumps(report.question_trace, ensure_ascii=False)),
+            '### 분석 모드·입력 cutoff',
+            _safe_text(json.dumps(report.analysis_input, ensure_ascii=False)),
             '### 문헌 검증 범위와 미해결 쟁점',
             _safe_text(json.dumps(report.research_trace, ensure_ascii=False)),
             '### 영상 계측·수동 표시 (임상 정확도 미검증)',

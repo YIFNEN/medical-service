@@ -18,6 +18,8 @@ def budget_arguments(parser):
     parser.add_argument('--budget-usd', type=float)
     parser.add_argument('--approval-id', default='default')
     parser.add_argument('--image-tokens-bound', type=int)
+    parser.add_argument('--approve-transmission', action='store_true',
+                        help='separate approval to send the reviewed personal input to configured providers')
 
 
 def approved_estimate(args, estimate):
@@ -25,6 +27,7 @@ def approved_estimate(args, estimate):
         raise ValueError('paid calls require --budget-usd and --approve-cost')
     return CostEstimate.model_validate({**estimate.model_dump(), 'approved': True,
         'budget_usd': args.budget_usd, 'approval_id': args.approval_id,
+        'transmission_approved': getattr(args, 'approve_transmission', False),
         'image_tokens_bound': args.image_tokens_bound})
 
 
@@ -68,6 +71,8 @@ def register(subparsers):
             parser.add_argument('--case')
             parser.add_argument('--citation')
     dicom = subparsers.add_parser('dicom').add_subparsers(dest='action', required=True)
+    from .imaging_cli import register as register_imaging
+    register_imaging(dicom)
     prepare = dicom.add_parser('prepare-slicer-test')
     store(prepare)
     source_test = dicom.add_parser('prepare-slicer-source-test')
@@ -106,7 +111,8 @@ def register(subparsers):
         parser.add_argument('--question')
         parser.add_argument('--run-id', default='literature-stages')
         parser.add_argument('--local-papers', type=Path)
-        parser.add_argument('--fulltext-limit', type=int, default=5)
+        from .settings import add_settings_arguments
+        add_settings_arguments(parser)
         if action == 'fetch':
             parser.add_argument('--retry-unavailable', action='store_true')
         parser.add_argument('--approve-cost', action='store_true')
@@ -122,6 +128,10 @@ def register(subparsers):
 
 
 def execute(args):
+    from .imaging_cli import execute as execute_imaging
+    handled = execute_imaging(args)
+    if handled is not None:
+        return handled
     root = Path(args.store)
     if args.command == 'inventory-review':
         from .material_roles import role_view, review_role
@@ -218,13 +228,18 @@ def execute(args):
             return 0, {'run_id': args.run_id, 'plans': plans, 'instruction': 'Review for identifiers before resume --approve-search.'}
         cards = tuple(EvidenceCard.model_validate_json(json.dumps(v)) for v in read_json(args.cards))
         context = read_json(args.context) if args.context else {}
-        if args.fulltext_limit < 0:
-            raise ValueError('fulltext-limit must be nonnegative')
+        from .settings import settings_from_args
+        settings = settings_from_args(args)
+        pin = {'case_id': args.case, 'settings': settings.model_dump(mode='json'),
+               'cards': [c.model_dump(mode='json') for c in cards], 'context': context,
+               'issues': read_json(args.issues) if args.issues else None}
+        ledger.append_once('LITERATURE_STAGE_CREATED', args.action, pin)
+        pending = []
         if args.action == 'fetch':
             resolver = FullTextResolver(ledger=ledger, local_papers=read_json(args.local_papers) if args.local_papers else {})
             result, requested = [], 0
             for card in sorted(cards, key=lambda c: (-c.priority_score, c.evidence_id)):
-                if card.fulltext_required and requested < args.fulltext_limit:
+                if card.fulltext_required and requested < settings.fulltext_limit:
                     card = resolver.fetch(card, retry_unavailable=args.retry_unavailable)
                     requested += 1
                 elif card.fulltext_required:
@@ -232,21 +247,37 @@ def execute(args):
                 result.append(card)
         else:
             registry = ModelRegistry.default()
-            estimate = registry.estimate_deliberation_cost(20000, evidence_limit=len(cards))
+            estimate = registry.estimate_research_cost(20000, settings=settings)
             if not args.approve_cost:
                 from .cli import _cost_payload
-                return 2, {**_cost_payload(estimate), 'scope': 'conservative workflow estimate; actual stage calls vary'}
+                return 2, {**_cost_payload(estimate), 'processing_settings': settings.model_dump(mode='json'),
+                           'scope': 'conservative workflow estimate; actual stage calls vary'}
             estimate = approved_estimate(args, estimate)
             gateways = build_live_gateways(registry)
             if args.action == 'screen':
-                screener = LiteratureScreener(gateways['anthropic'], ledger, registry)
+                screener = LiteratureScreener(gateways['anthropic'], ledger, registry, settings)
                 issues = tuple(DecisionIssue.model_validate_json(json.dumps(v)) for v in read_json(args.issues)) if args.issues else screener.issues(
                     QuestionSet.for_comprehensive_review(args.case, args.question), context, estimate)
-                result = screener.screen(cards, issues, context, estimate)
+                result = screener.screen(cards[:settings.screening_limit], issues, context, estimate)
+                pending = [c.evidence_id for c in cards[settings.screening_limit:]]
+                result += cards[settings.screening_limit:]
                 save_json(root, 'literature/issues', [i.model_dump(mode='json') for i in issues])
             else:
-                appraiser = EvidenceAppraiser(gateways['anthropic'], ledger, registry)
-                result = [appraiser.appraise(c, context, estimate) for c in cards if c.screening_status != 'EXCLUDE']
+                appraiser = EvidenceAppraiser(gateways['anthropic'], ledger, registry, settings)
+                result, fulltexts, count = [], 0, 0
+                for card in cards:
+                    if card.screening_status == 'EXCLUDE':
+                        result.append(card)
+                        continue
+                    if count >= settings.evidence_limit or (card.access_level == 'FULL_TEXT' and fulltexts >= settings.fulltext_limit):
+                        pending.append(card.evidence_id)
+                        result.append(card.model_copy(update={'appraisal_status': 'UNAPPRAISED',
+                                                             'analysis_scope': 'UNREVIEWED', 'fulltext_status': 'PENDING_LIMIT'}))
+                        continue
+                    count += 1
+                    fulltexts += card.access_level == 'FULL_TEXT'
+                    result.append(appraiser.appraise(card, context, estimate))
         path = save_json(root, 'literature/' + args.action, [c.model_dump(mode='json') for c in result])
-        return 0, {'path': str(path), 'card_count': len(result)}
+        return 0, {'path': str(path), 'card_count': len(result), 'pending_ids': pending,
+                   'processing_settings': settings.model_dump(mode='json')}
     return None

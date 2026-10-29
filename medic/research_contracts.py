@@ -9,8 +9,8 @@ from typing import Any, Literal
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, HttpUrl, field_validator, model_validator
 
 
-class StrictFrozenModel(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True, strict=True, allow_inf_nan=False)
+from .model_base import StrictFrozenModel
+from .questions import QuestionClaim
 
 
 ANKLE_REVIEW_DOMAINS = (
@@ -115,6 +115,13 @@ class EvidenceCard(StrictFrozenModel):
     unresolved_source_locators: tuple[str, ...] = ()
     analyzed_locators: tuple[str, ...] = ()
     fulltext_url: str | None = None
+    publication_status: Literal['NOT_CHECKED', 'SOURCE_CHECKED_NO_NOTICE', 'CORRECTION_REQUIRES_REVIEW',
+                                'EXPRESSION_OF_CONCERN', 'RETRACTED'] = 'NOT_CHECKED'
+    publication_updates: tuple[dict, ...] = ()
+    publication_notice_reviewed: bool = False
+    study_id: str | None = None
+    study_link_status: Literal['UNVERIFIED', 'USER_REVIEWED'] = 'UNVERIFIED'
+    included_study_ids: tuple[str, ...] = ()
 
 
 class FactScope(StrictFrozenModel):
@@ -232,6 +239,8 @@ class ConditionalAction(StrictFrozenModel):
     benefits: tuple[str, ...]
     downsides: tuple[str, ...]
     evidence_ids: tuple[str, ...] = Field(min_length=1)
+    question_ids: tuple[str, ...] = ()
+    claim_ids: tuple[str, ...] = ()
 
 
 class ProposedSynthesis(StrictFrozenModel):
@@ -244,6 +253,7 @@ class ProposedSynthesis(StrictFrozenModel):
     decision_changers: tuple[str, ...]
     conditional_actions: tuple[ConditionalAction, ...] = Field(min_length=1)
     evidence_ids: tuple[str, ...]
+    question_claims: tuple[QuestionClaim, ...] = ()
 
     @model_validator(mode="after")
     def require_ranked_matching_actions(self) -> "ProposedSynthesis":
@@ -268,6 +278,8 @@ class ClaimReview(StrictFrozenModel):
     patient_fact_ids: tuple[str, ...] = ()
     source_quotes: tuple[ClaimQuote, ...]
     requires_fulltext_verification: bool = False
+    required_evidence_fields: tuple[Literal['study_design', 'population', 'intervention', 'comparator',
+                                          'findings', 'effect_estimates', 'limitations'], ...] = ()
 
 
 class WithheldClaim(StrictFrozenModel):
@@ -333,6 +345,9 @@ class MedicalDecisionReport(StrictFrozenModel):
     original_synthesis: ProposedSynthesis | None = None
     research_trace: dict = Field(default_factory=dict)
     imaging_reviews: tuple[dict, ...] = ()
+    question_trace: dict = Field(default_factory=dict)
+    case_context: dict = Field(default_factory=dict)
+    analysis_input: dict = Field(default_factory=dict)
 
     @field_validator("labels")
     @classmethod

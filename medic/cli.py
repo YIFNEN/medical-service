@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import getpass
 import json
+import uuid
 from datetime import date
 from pathlib import Path
 from typing import Any, Sequence
@@ -29,6 +30,7 @@ from .research_contracts import EvidenceCard, QuestionSet
 from .tribunal import PROMPT_VERSION, TribunalResult, TribunalService
 from .workflow import ResearchWorkflow
 from .extended_cli import register, execute, budget_arguments, approved_estimate, read_json, run_id
+from .settings import add_settings_arguments, settings_from_args, has_settings_override, ProcessingSettings
 
 
 def _components(root: Path):
@@ -39,12 +41,15 @@ def _components(root: Path):
 
 
 def _store_argument(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--store", type=Path, default=Path("medic-data"))
+    parser.add_argument("--store", type=Path, default=Path(".medic"))
 
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="medic")
     subparsers = parser.add_subparsers(dest="command", required=True)
+    doctor = subparsers.add_parser('doctor')
+    doctor.add_argument('--slicer', type=Path)
+    _store_argument(doctor)
 
     ingest = subparsers.add_parser("ingest")
     ingest.add_argument("--case-id", required=True)
@@ -80,8 +85,7 @@ def _parser() -> argparse.ArgumentParser:
     deliberate.add_argument("--run-id")
     deliberate.add_argument("--approve-cost", action="store_true")
     deliberate.add_argument("--input-tokens", type=int, default=20_000)
-    deliberate.add_argument("--max-results", type=int, default=10)
-    deliberate.add_argument("--evidence-limit", type=int, default=20)
+    add_settings_arguments(deliberate)
     _store_argument(deliberate)
 
     resume = subparsers.add_parser("resume")
@@ -89,6 +93,7 @@ def _parser() -> argparse.ArgumentParser:
     resume.add_argument("--approve-cost", action="store_true")
     resume.add_argument("--input-tokens", type=int, default=20_000)
     _store_argument(resume)
+    add_settings_arguments(resume)
 
     report = subparsers.add_parser("report")
     report.add_argument("run_id")
@@ -97,11 +102,20 @@ def _parser() -> argparse.ArgumentParser:
     _store_argument(report)
     for paid in (review, deliberate, resume):
         budget_arguments(paid)
-    deliberate.add_argument('--fulltext-limit', type=int, default=5)
     deliberate.add_argument('--local-papers', type=Path)
     deliberate.add_argument('--approve-search', action='store_true')
+    deliberate.add_argument('--mode', choices=('standard', 'clinician-blind'), default='standard')
+    deliberate.add_argument('--blind-review', type=Path)
     resume.add_argument('--approve-search', action='store_true')
     register(subparsers)
+    from .provider_checks import register as register_provider_checks
+    register_provider_checks(subparsers)
+    from .case_cli import register as register_case
+    register_case(subparsers)
+    from .clinician_comparison import register as register_clinician
+    register_clinician(subparsers)
+    from .inventory_ingest import register as register_inventory_ingest
+    register_inventory_ingest(subparsers)
     return parser
 
 
@@ -243,7 +257,7 @@ def _latest_context(ledger: AppendOnlyJsonlLedger, case_id: str) -> dict[str, An
     if not found:
         uncertainties.append('No source-reviewed clinical documents; imaging annotations alone are not a diagnosis.')
     details = [facts_by_key[key] for key in key_order if key in facts_by_key]
-    return {
+    context = {
         "confirmed_facts": unstructured_facts + [
             f"{item['fact_key']}: {item.get('value')}" for item in details
         ],
@@ -253,6 +267,9 @@ def _latest_context(ledger: AppendOnlyJsonlLedger, case_id: str) -> dict[str, An
         "extraction_calls": list(extraction_calls.values()),
         'imaging_reviews': list(imaging_reviews.values()),
     }
+    from .case_context import enrich_context
+    from .question_runtime import attach_questions
+    return attach_questions(ledger, case_id, enrich_context(ledger, case_id, context))
 
 
 def _interactive_review(service: ClinicalExtractionService, extraction: ExtractionResult) -> dict[str, object]:
@@ -270,6 +287,9 @@ def _interactive_review(service: ClinicalExtractionService, extraction: Extracti
 
 
 def _render_completed(root: Path, result: TribunalResult, output: Path | None = None):
+    if result.patient_context.get('analysis_input', {}).get('mode') == 'CLINICIAN_BLIND':
+        from .blinding import seal_result
+        seal_result(root, result)
     report = ReportRenderer.build(result)
     return ReportRenderer.write(report, output or root / "reports" / result.run_id)
 
@@ -281,9 +301,26 @@ def _literature_retriever(limit: int):
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    if args.command == 'doctor':
+        from .doctor import inspect_environment
+        result = inspect_environment(args.store, slicer=args.slicer)
+        print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+        return 0 if result['offline_ready'] else 2
     if getattr(args, 'run_id', None):
         run_id(args.run_id)
-    handled = execute(args)
+    from .provider_checks import execute as execute_provider_checks
+    handled = execute_provider_checks(args)
+    if handled is None:
+        from .case_cli import execute as execute_case
+        handled = execute_case(args)
+    if handled is None:
+        from .clinician_comparison import execute as execute_clinician
+        handled = execute_clinician(args)
+    if handled is None:
+        from .inventory_ingest import execute as execute_inventory_ingest
+        handled = execute_inventory_ingest(args)
+    if handled is None:
+        handled = execute(args)
     if handled is not None:
         code, payload = handled
         print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
@@ -381,20 +418,32 @@ def main(argv: Sequence[str] | None = None) -> int:
         registry = ModelRegistry.default()
         if args.approve_cost and args.budget_usd is None:
             raise ValueError('paid calls require --budget-usd')
-        if args.evidence_limit < 1:
-            raise ValueError("evidence-limit must be positive")
-        estimate = registry.estimate_research_cost(args.input_tokens, evidence_limit=args.evidence_limit,
-                                                  fulltext_limit=args.fulltext_limit)
+        settings = settings_from_args(args)
+        from .questions import CaseQuestionService
+        active = CaseQuestionService(ledger).load(args.case).active
+        count = 7 + bool(args.question) + (len(active.bundle.questions) if active else 0)
+        estimate = registry.estimate_research_cost(args.input_tokens, settings=settings, question_count=count)
         if not args.approve_cost:
-            print(json.dumps(_cost_payload(estimate), ensure_ascii=False, sort_keys=True))
+            print(json.dumps({**_cost_payload(estimate), 'processing_settings': settings.model_dump(mode='json'),
+                              'question_count': estimate.question_count,
+                              'estimate_scope': 'bounded batches/chunks and three-provider review; questions share prompts; not a billing guarantee'}, ensure_ascii=False, sort_keys=True))
             return 2
         context = _latest_context(ledger, args.case)
         gateways = build_live_gateways(registry)
         questions = QuestionSet.for_comprehensive_review(args.case, args.question)
-        result = ResearchWorkflow(root, gateways, _literature_retriever(args.max_results), registry).run(
+        if args.mode == 'clinician-blind':
+            if not args.blind_review:
+                raise ValueError('clinician-blind requires --blind-review with reviewed input visibility')
+            from .blinding import create_blind_input
+            args.run_id = args.run_id or 'research-run-' + uuid.uuid4().hex
+            context = create_blind_input(root, args.run_id, args.case, context,
+                questions.model_dump(mode='json'), read_json(args.blind_review))
+        elif args.blind_review:
+            raise ValueError('--blind-review requires --mode clinician-blind')
+        result = ResearchWorkflow(root, gateways, _literature_retriever(settings.max_results), registry).run(
             run_id=args.run_id, case_id=args.case, patient_context=context,
-            question_set=questions, estimate=approved_estimate(args, estimate), evidence_limit=args.evidence_limit,
-            fulltext_limit=args.fulltext_limit, local_papers=read_json(args.local_papers) if args.local_papers else {},
+            question_set=questions, estimate=approved_estimate(args, estimate), settings=settings,
+            local_papers=read_json(args.local_papers) if args.local_papers else {},
             search_approved=args.approve_search,
         )
         paths = _render_completed(root, result)
@@ -405,6 +454,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             "labels": ["PERSONAL_RESEARCH", "AI_MEDICAL_DECISION_SUPPORT"],
         }
     elif command == "resume":
+        if has_settings_override(args):
+            raise ValueError('run settings are pinned; create a new run to change processing settings')
         run_ledger = AppendOnlyJsonlLedger(root / "runs" / args.run_id / "ledger.jsonl")
         records = run_ledger.records()
         if any(record["kind"] == "TRIBUNAL_COMPLETED" for record in records):
@@ -423,6 +474,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 return 2
             if estimate.budget_usd is None:
                 raise ValueError('legacy run has no approved budget; create a new run')
+            if not args.approve_transmission or not estimate.transmission_approved:
+                raise PermissionError('personal-data transmission approval is required and must be pinned to this run')
             if args.budget_usd is not None and args.budget_usd != estimate.budget_usd:
                 raise ValueError('run budget is pinned; create a new approved run')
             limit = workflow_manifest["sources"][0]["limit"]
@@ -433,6 +486,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 estimate=estimate.approve(),
                 evidence_limit=workflow_manifest["evidence_limit"],
                 fulltext_limit=workflow_manifest.get('fulltext_limit', 5),
+                settings=ProcessingSettings.model_validate(workflow_manifest['processing_settings']) if workflow_manifest.get('processing_settings') else None,
                 local_papers=workflow_manifest.get('local_papers', {}), search_approved=args.approve_search,
             )
             paths = _render_completed(root, result)

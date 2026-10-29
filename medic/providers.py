@@ -87,6 +87,8 @@ class ApprovedGateway:
             raise PermissionError("explicit cost approval is required before provider calls")
         if isinstance(self.inner, _LiveGateway) and not _budget_reserved:
             raise PermissionError('live calls require the persistent budget reservation boundary')
+        if isinstance(self.inner, _LiveGateway) and estimate.data_scope == 'PERSONAL' and not estimate.transmission_approved:
+            raise PermissionError('separate personal-data transmission approval is required')
         response = self.inner.generate_raw(
             stage=stage,
             prompt=prompt,

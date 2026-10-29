@@ -10,6 +10,9 @@ from .config import ModelRegistry
 
 def cached_generate(ledger, gateway, *, scope, **kwargs):
     """Persist each successful paid boundary before starting the next call."""
+    if ledger.path.parent.parent.name == 'runs':
+        from .blinding import assert_no_leak
+        assert_no_leak(ledger.path.parent.parent.parent, ledger.path.parent.name, kwargs['prompt'])
     schema = kwargs["output_model"]
     key = deterministic_id("provider-call-v1", {
         "scope": scope, "provider": gateway.provider, "model": gateway.model,
@@ -28,6 +31,8 @@ def cached_generate(ledger, gateway, *, scope, **kwargs):
         if not estimate.approved:
             raise PermissionError('explicit cost approval is required before reservation')
         registry = getattr(gateway, 'registry', None) or ModelRegistry.default()
+        if isinstance(gateway.inner, _LiveGateway) and estimate.data_scope == 'PERSONAL' and not estimate.transmission_approved:
+            raise PermissionError('separate personal-data transmission approval is required before reservation')
         if isinstance(gateway.inner, _LiveGateway) and estimate.budget_usd is None:
             raise PermissionError('live calls require an explicit budget_usd')
         budget = None

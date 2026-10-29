@@ -107,6 +107,11 @@ def import_review(review, manifest, *, review_dir=None):
     if found != set(s['original_hashes']):
         raise ValueError('missing original instances')
     measurements = []
+    source_instances = [i for i in manifest['instances'] if i['sha256'] in s['original_hashes']]
+    source_conditions = {'weight_bearing': s.get('weight_bearing', 'UNKNOWN'),
+                         'modality': sorted({i.get('modality', 'UNKNOWN') for i in source_instances}),
+                         'laterality': sorted({i.get('laterality', 'UNKNOWN') for i in source_instances})}
+    measurement_ids = set()
     for markup in review['markups']:
         coord = markup.get('coordinate_system')
         if coord not in ('LPS','RAS'):
@@ -114,8 +119,22 @@ def import_review(review, manifest, *, review_dir=None):
         points = markup['points']
         if coord == 'RAS':
             points = [ras_to_lps(p) for p in points]
-        measurements.append(measure_series(s, points, kind=markup['kind'],
-            protocol=markup.get('protocol'), axes=markup.get('axes'), plane=markup.get('plane')))
+        result = measure_series(s, points, kind=markup['kind'],
+            protocol=markup.get('protocol'), axes=markup.get('axes'), plane=markup.get('plane'))
+        identifier = markup.get('measurement_id')
+        if identifier is not None:
+            if not isinstance(identifier, str) or not identifier.strip() or identifier in measurement_ids:
+                raise ValueError('measurement ID must be nonempty and unique within review')
+            measurement_ids.add(identifier)
+        metadata = markup.get('metadata', {})
+        if not isinstance(metadata, dict):
+            raise ValueError('measurement metadata must be an object')
+        result.update(measurement_id=identifier, name=markup.get('name'), metadata=deepcopy(metadata),
+                      source_conditions=deepcopy(source_conditions),
+                      metadata_status='USER_DECLARED_NOT_CLINICALLY_VALIDATED' if metadata else 'UNREVIEWED')
+        from .measurement_comparison import validate_source_conditions
+        validate_source_conditions(result, source_conditions)
+        measurements.append(result)
     masks = []
     roi = None
     for item in review['segmentations']:

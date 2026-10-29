@@ -4,14 +4,24 @@ on:
   pull_request:
 permissions:
   contents: read
+concurrency:
+  group: offline-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
   offline:
     runs-on: windows-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
       - run: python -m pip install -e ".[test]"
-      - run: python -m pytest -q
-      - run: python -m medic.cli --help
+      - run: python -m pytest -q --junitxml=test-results/offline.xml
+      - run: python -m medic --help
+      - name: Preserve synthetic test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: offline-test-results
+          path: test-results/offline.xml

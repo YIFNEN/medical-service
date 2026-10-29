@@ -33,7 +33,7 @@ from .research_contracts import (
 
 T = TypeVar("T", bound=BaseModel)
 PROVIDERS = ("openai", "anthropic", "google")
-PROMPT_VERSION = "medic-agent-first/3.2"
+PROMPT_VERSION = "medic-agent-first/4.0"
 
 
 def blind_opinion_id(reviewer: str, opinion_id: str) -> str:
@@ -203,9 +203,14 @@ class TribunalService:
             if call:
                 calls.append(call)
 
+        from .questions import QuestionClaim
         synthesis_prompt = self._json_prompt(
-            "Propose agreements, disagreements, conditional action ranking, and decision-changing information. Preserve dissent.",
-            {"revised_opinions": tuple(revisions.values()), "peer_reviews": peer_reviews, "evidence": evidence_cards},
+            "Propose agreements, disagreements, conditional action ranking, and decision-changing information. Preserve dissent. "
+            "If scoped_questions are supplied, return question_claims conforming to question_claim_schema, at least one per question. "
+            "Use only each question's allowed IDs. Record MISSING_DATA or SYSTEM_FAILURE separately. "
+            "Link conditional_actions question_ids and claim_ids to these claims. Never invent missing conditions or personal numeric risks.",
+            {"revised_opinions": tuple(revisions.values()), "peer_reviews": peer_reviews, "evidence": evidence_cards,
+             'patient': patient_context, 'question_claim_schema': QuestionClaim.model_json_schema()},
         )
         synthesis, call = self._stage(
             ledger, "SYNTHESIS_COMPLETED", "openai", self.gateways["openai"],
@@ -240,7 +245,11 @@ class TribunalService:
                 calls.append(call)
 
         original_synthesis = synthesis
+        from .question_runtime import question_claim_trace
         synthesis, withheld = ground_synthesis(synthesis, synthesis_reviews, evidence_cards, patient_context)
+        trace = question_claim_trace(patient_context, original_synthesis, evidence_cards, withheld)
+        if trace:
+            patient_context = {**patient_context, 'question_trace': trace}
         result = TribunalResult(
             run_id=run_id,
             case_id=case_id,
@@ -298,6 +307,8 @@ class TribunalService:
                 json.dumps(existing["payload"]["call"], ensure_ascii=False)
             )
             return value, call
+        from .blinding import assert_no_leak
+        assert_no_leak(self.root, ledger.path.parent.name, prompt)
         response = cached_generate(ledger, gateway, scope={"prompt_version": PROMPT_VERSION,
                                    "registry": self.registry.model_dump(mode="json")},
             stage=kind,
@@ -311,6 +322,7 @@ class TribunalService:
                     "reviewer_provider": response.provider, "reviewer_model": response.model}
         value = response.value.model_copy(update={key: value for key, value in metadata.items()
                                                  if key in type(response.value).model_fields})
+        assert_no_leak(self.root, ledger.path.parent.name, value.model_dump_json())
         self._validate_citations(value, gate)
         call = self.registry.call_record(kind, response)
         ledger.append_once(
@@ -325,6 +337,8 @@ class TribunalService:
         def walk(item: Any) -> None:
             if isinstance(item, dict):
                 for key, child in item.items():
+                    if key == 'question_claims':
+                        continue  # question claims receive claim-local scope/citation validation
                     if key == "evidence_ids" and isinstance(child, list):
                         ids.extend(str(identifier) for identifier in child)
                     else:
@@ -353,6 +367,10 @@ class TribunalService:
             "Imaging measurement and segmentation fact_id values may support observations only. Keep their review status and acquisition conditions explicit; "
             "USER_REVIEWED is not expert validation. Manual regions do not diagnose lesion extent, and unmarked tissue is not normal. "
             "Do not rename an arbitrary angle as clinical deformity or infer change across incompatible acquisition conditions. "
+            "Separate source observation, clinician assertion, patient experience, requests and actual exposure using case_context reviews. "
+            "Prescription is not actual use. Do not double count copied records or derived self-report. "
+            "Do not invent a prognosis horizon, intervention comparator, personal utility weights, individual risk percentages, NNT or absolute causal effects. "
+            "Missing personal goals prevent a single-best treatment choice, not analysis of current observations. "
             "Cite only evidence_id values supplied here. Write clinical analysis in Korean.",
             {"patient": patient_context, "questions": question_set, "evidence": evidence_cards},
         )

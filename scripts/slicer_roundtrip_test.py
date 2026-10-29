@@ -32,6 +32,10 @@ def run(config):
     expected_ras = []
     for kind, points in (('Line', config['line_voxels']), ('Angle', config['angle_voxels'])):
         node = slicer.mrmlScene.AddNewNodeByClass(f'vtkMRMLMarkups{kind}Node')
+        bridge['bind_markup'](volume, node)
+        node.SetName('Synthetic ' + kind)
+        node.SetAttribute('Medic.MeasurementID', 'synthetic-' + kind.lower())
+        node.SetAttribute('Medic.Metadata', json.dumps({'method': 'synthetic-known-landmarks', 'protocol_version': '1'}))
         ras_points = []
         for point in points:
             lps = (affine @ np.array([*point, 1.0]))[:3]
@@ -62,6 +66,11 @@ def run(config):
         if markup['coordinate_system'] != 'RAS' or not np.allclose(markup['points'], expected, atol=1e-6, rtol=0):
             raise ValueError('exported markup coordinates differ from placed points')
     imported = import_review(review, manifest, review_dir=Path(review_path).parent)
+    for index, kind in enumerate(('Line', 'Angle')):
+        observation = imported['measurements'][index]
+        if (observation['measurement_id'] != 'synthetic-' + kind.lower() or observation['name'] != 'Synthetic ' + kind
+                or observation['metadata'] != {'method': 'synthetic-known-landmarks', 'protocol_version': '1'}):
+            raise ValueError('measurement metadata did not survive Slicer round trip')
     exported_roles = [item['role'] for item in review['segmentations']]
     if sorted(exported_roles) != ['evaluation_roi', 'manual_lesion']:
         raise ValueError('missing or duplicated segmentation roles')

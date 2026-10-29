@@ -1,0 +1,11 @@
+{
+  "schema_version": "case-profile/1",
+  "case_id": "ANKLE-PILOT-001",
+  "patient_id": "SYNTHETIC-PERSON-001",
+  "symptoms": [{"name": "pain", "value": "SYNTHETIC: pain after a long walk", "missingness": "present"}],
+  "function": [{"name": "walking", "value": "SYNTHETIC: 20 minutes", "missingness": "present"}],
+  "activity": [{"name": "daily_activity", "value": "SYNTHETIC: desk work", "missingness": "present"}],
+  "constraints": [{"name": "scheduling", "value": "SYNTHETIC: limited weekday appointments", "missingness": "present"}],
+  "goals": [{"name": "desired_outcome", "value": "SYNTHETIC: longer comfortable walking", "missingness": "present"}],
+  "priorities": [{"name": "priority", "value": "SYNTHETIC: mobility and treatment burden", "missingness": "present"}]
+}

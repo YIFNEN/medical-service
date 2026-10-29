@@ -1,0 +1,10 @@
+{
+  "schema_version": "case-questions/1",
+  "case_id": "ANKLE-PILOT-001",
+  "reviewer": "synthetic-operator",
+  "reason": "SYNTHETIC question contract example; replace fact references after source review",
+  "questions": [
+    {"question_id": "q-current", "type": "CURRENT_STATE", "text": "SYNTHETIC: What observations describe the current ankle?", "target": "ankle", "assessment_time": "current reviewed input"},
+    {"question_id": "q-prognosis", "type": "PROGNOSIS", "text": "SYNTHETIC: What prognosis can be discussed?", "target": "ankle", "assessment_time": "current reviewed input"}
+  ]
+}

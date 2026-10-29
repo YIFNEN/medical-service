@@ -1,0 +1,14 @@
+{
+  "person_id": "SYNTHETIC-PERSON-001",
+  "episode_id": "SYNTHETIC-EPISODE",
+  "epoch_id": "SYNTHETIC-BASELINE",
+  "anatomy": "ankle",
+  "laterality": "RIGHT",
+  "metric": "manual distance between reviewed landmarks",
+  "method": "two_landmarks_3D",
+  "protocol_version": "1",
+  "landmarks": ["landmark-A", "landmark-B"],
+  "plane_definition": "3D",
+  "acquisition": {"modality": "CT", "weight_bearing": "UNKNOWN", "position": "UNKNOWN", "protocol": "UNKNOWN"},
+  "reviewer": "synthetic-operator"
+}
