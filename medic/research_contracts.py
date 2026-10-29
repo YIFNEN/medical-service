@@ -241,6 +241,7 @@ class ConditionalAction(StrictFrozenModel):
     evidence_ids: tuple[str, ...] = Field(min_length=1)
     question_ids: tuple[str, ...] = ()
     claim_ids: tuple[str, ...] = ()
+    decision_mode: Literal['OPTIONS', 'SINGLE_BEST'] = 'OPTIONS'
 
 
 class ProposedSynthesis(StrictFrozenModel):
@@ -287,6 +288,7 @@ class WithheldClaim(StrictFrozenModel):
     location: str
     original_text: str
     reasons: tuple[str, ...]
+    status: Literal['MISSING_DATA', 'CONFLICT', 'OUT_OF_SCOPE', 'SYSTEM_FAILURE'] = 'MISSING_DATA'
 
 
 class SynthesisReview(StrictFrozenModel):

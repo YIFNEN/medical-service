@@ -4,7 +4,8 @@ from .ledger import deterministic_id
 
 
 def available_references(context, cards=()):
-    facts = frozenset(f['fact_id'] for f in context.get('fact_details', ()) if f.get('fact_id') and f.get('user_confirmed'))
+    facts = frozenset(f['fact_id'] for f in context.get('fact_details', ()) if f.get('fact_id')
+        and f.get('user_confirmed') is True and f.get('confirmation_scope') != 'UNREVIEWED_EXTRACTION')
     measurements = frozenset(m['fact_id'] for review in context.get('imaging_reviews', ())
         if review.get('review_status') in ('USER_REVIEWED', 'EXPERT_REVIEWED')
         for m in review.get('measurements', ()) if m.get('fact_id'))
@@ -34,17 +35,19 @@ def scope_questions(context, cards, issues):
 
 def question_claim_trace(context, synthesis, cards, withheld=()):
     questions = context.get('scoped_questions', context.get('typed_questions', ()))
-    if not questions:
+    if not questions and not synthesis.question_claims:
         return {}
     results = validate_question_claims(questions, synthesis.question_claims, available=available_references(context, cards))
-    withheld_by_id = {c.claim_id: c for c in withheld}
+    withheld_by_location = {c.location: c for c in withheld}
     presented = []
-    for claim, result in zip(synthesis.question_claims, results):
+    for index, (claim, result) in enumerate(zip(synthesis.question_claims, results)):
         claim = claim.model_dump(mode='json')
         if result is not None:
-            blocked = withheld_by_id.get(result.claim_id)
+            blocked = withheld_by_location.get(f'question_claims.{index}.text')
             presented.append({'claim_id': result.claim_id, 'question_id': result.question_id,
-                'status': result.status if not blocked else 'CONFLICT', 'accepted': result.accepted and not blocked,
+                'occurrence_id': deterministic_id('question-claim-occurrence', {'index': index,
+                    'claim_id': result.claim_id, 'question_id': result.question_id}),
+                'status': blocked.status if blocked else result.status, 'accepted': result.accepted and not blocked,
                 'text': claim['text'] if result.accepted and not blocked else '판단 보류: 질문별 사용 자격 또는 근거 검증 미충족',
                 'reasons': list(result.reasons) + (list(blocked.reasons) if blocked else []), 'citations': claim.get('citations', {}),
                 'uncertainty': claim.get('uncertainty', {})})

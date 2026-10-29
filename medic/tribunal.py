@@ -33,7 +33,7 @@ from .research_contracts import (
 
 T = TypeVar("T", bound=BaseModel)
 PROVIDERS = ("openai", "anthropic", "google")
-PROMPT_VERSION = "medic-agent-first/4.0"
+PROMPT_VERSION = "medic-agent-first/4.1"
 
 
 def blind_opinion_id(reviewer: str, opinion_id: str) -> str:
@@ -208,7 +208,9 @@ class TribunalService:
             "Propose agreements, disagreements, conditional action ranking, and decision-changing information. Preserve dissent. "
             "If scoped_questions are supplied, return question_claims conforming to question_claim_schema, at least one per question. "
             "Use only each question's allowed IDs. Record MISSING_DATA or SYSTEM_FAILURE separately. "
-            "Link conditional_actions question_ids and claim_ids to these claims. Never invent missing conditions or personal numeric risks.",
+            "Link every conditional_actions question_id to its own answering supporting claim. "
+            "Use decision_mode OPTIONS for conditional options; SINGLE_BEST requires the personal goals, constraints and priorities. "
+            "Ranking is presentation order, not an invented patient utility. Never invent missing conditions or personal numeric risks.",
             {"revised_opinions": tuple(revisions.values()), "peer_reviews": peer_reviews, "evidence": evidence_cards,
              'patient': patient_context, 'question_claim_schema': QuestionClaim.model_json_schema()},
         )
@@ -339,6 +341,8 @@ class TribunalService:
                 for key, child in item.items():
                     if key == 'question_claims':
                         continue  # question claims receive claim-local scope/citation validation
+                    if key == 'claim_reviews' and isinstance(value, SynthesisReview):
+                        continue  # invalid audit citations withhold only the audited claim
                     if key == "evidence_ids" and isinstance(child, list):
                         ids.extend(str(identifier) for identifier in child)
                     else:
@@ -347,6 +351,12 @@ class TribunalService:
                 for child in item:
                     walk(child)
         walk(value.model_dump(mode="json"))
+        if isinstance(value, SynthesisReview):
+            localized = {eid for audit in value.claim_reviews for eid in audit.evidence_ids}
+            localized.update(quote.evidence_id for audit in value.claim_reviews for quote in audit.source_quotes)
+            # A bad ID also listed in the summary remains claim-local when the
+            # review identifies the exact claim(s) using it. Grounding audits those.
+            ids = [eid for eid in ids if eid not in localized]
         gate.validate(ids)
 
     @staticmethod
@@ -370,6 +380,7 @@ class TribunalService:
             "Separate source observation, clinician assertion, patient experience, requests and actual exposure using case_context reviews. "
             "Prescription is not actual use. Do not double count copied records or derived self-report. "
             "Do not invent a prognosis horizon, intervention comparator, personal utility weights, individual risk percentages, NNT or absolute causal effects. "
+            "No independently validated personal numeric model is connected in this prototype; model self-attestation cannot authorize such numeric estimates. "
             "Missing personal goals prevent a single-best treatment choice, not analysis of current observations. "
             "Cite only evidence_id values supplied here. Write clinical analysis in Korean.",
             {"patient": patient_context, "questions": question_set, "evidence": evidence_cards},

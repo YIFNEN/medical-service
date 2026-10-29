@@ -77,6 +77,8 @@ def _conditional_action_details(values) -> str:
         lines.extend((
             f"### {action.rank}. {_safe_text(action.action)}",
             "",
+            f"표시 방식: {_safe_text(action.decision_mode)} (OPTIONS의 순서는 개인별 최선의 치료 순위가 아님)",
+            "",
             _detail("전제조건", action.prerequisites),
             _detail("장점", action.benefits),
             _detail("단점", action.downsides),

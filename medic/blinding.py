@@ -164,8 +164,20 @@ def create_blind_input(root, run_id, case_id, context, questions, approval):
 
 
 def _check_hidden(hidden, text):
+    json_escapes = re.compile(r'(?:\\(?:["\\/bfnrt]|u[0-9a-fA-F]{4}))+')
     def normalize(s):
-        s = re.sub(r'\\u([0-9a-fA-F]{4})', lambda m: chr(int(m.group(1), 16)), s)
+        # Prompts may contain JSON embedded in string-valued metadata. Decode
+        # valid JSON escapes through each layer before exact-phrase matching.
+        # Cap repeated scans at 16 layers; deeper encoding fails closed rather
+        # than allowing an untrusted backslash chain to consume unbounded work.
+        for _ in range(16):
+            decoded = json_escapes.sub(lambda m: json.loads('"' + m.group(0) + '"'), s)
+            if decoded == s:
+                break
+            s = decoded
+        else:
+            if json_escapes.search(s):
+                raise ValueError('blind input exceeds 16 JSON escape decoding layers')
         return ' '.join(unicodedata.normalize('NFC', s).casefold().split())
     candidate = normalize(text)
     for item in hidden['facts']:

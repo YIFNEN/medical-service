@@ -26,13 +26,15 @@ def synthesis_claims(synthesis):
 
 
 def known_patient_fact_ids(patient):
-    facts = {item['fact_id'] for item in patient.get('fact_details', ()) if item.get('fact_id')}
+    facts = {item['fact_id'] for item in patient.get('fact_details', ())
+             if item.get('fact_id') and item.get('user_confirmed') is True
+             and item.get('confirmation_scope') != 'UNREVIEWED_EXTRACTION'}
     for review in patient.get('imaging_reviews', ()):
         if review.get('review_status') not in {'USER_REVIEWED', 'EXPERT_REVIEWED'}:
             continue
         for kind in ('measurements', 'segmentations'):
             facts.update(item['fact_id'] for item in review.get(kind, ()) if item.get('fact_id'))
-    return facts
+    return facts - set(patient.get('case_context', {}).get('ineligible_fact_ids', ()))
 
 
 def _fulltext_supports(audit, cited):
@@ -59,6 +61,7 @@ def ground_synthesis(synthesis, reviews, evidence, patient):
     cards = {card.evidence_id: card for card in evidence}
     facts = known_patient_fact_ids(patient)
     objections = {claim_id: [] for claim_id in expected}
+    statuses = {claim_id: 'MISSING_DATA' for claim_id in expected}
     for review in reviews:
         ids = [item.claim_id for item in review.claim_reviews]
         if set(ids) != expected or len(ids) != len(expected):
@@ -68,6 +71,8 @@ def ground_synthesis(synthesis, reviews, evidence, patient):
             reasons = []
             if audit.verdict != "SUPPORTED":
                 reasons.append(f"{review.reviewer_provider}: {audit.rationale}")
+                if audit.verdict == 'CONTRADICTED':
+                    statuses[audit.claim_id] = 'CONFLICT'
             if set(audit.evidence_ids) - set(cards) or set(audit.patient_fact_ids) - facts:
                 reasons.append("unknown evidence or patient fact ID")
             if not audit.source_quotes and not audit.patient_fact_ids:
@@ -94,7 +99,7 @@ def ground_synthesis(synthesis, reviews, evidence, patient):
             raise ValueError("evidence contradiction is not localized to a claim")
     known_urls = {str(card.url).rstrip("/") for card in evidence}
     questions = patient.get('scoped_questions', patient.get('typed_questions', ()))
-    if questions:
+    if questions or synthesis.question_claims:
         from .question_runtime import available_references
         from .questions import validate_question_claims
         results = validate_question_claims(questions, synthesis.question_claims,
@@ -103,6 +108,11 @@ def ground_synthesis(synthesis, reviews, evidence, patient):
             claim = next(c for c in claims if c['location'] == f'question_claims.{index}.text')
             if not result.accepted:
                 objections[claim['claim_id']].extend(result.reasons)
+                priority = {'MISSING_DATA': 0, 'CONFLICT': 1, 'OUT_OF_SCOPE': 2, 'SYSTEM_FAILURE': 3}
+                if priority[result.status] > priority[statuses[claim['claim_id']]]:
+                    statuses[claim['claim_id']] = result.status
+            if synthesis.question_claims[index].numeric_estimate is not None:
+                objections[claim['claim_id']].append('individual numeric model has not been independently validated for this prototype; model attestation is insufficient')
         known_questions = {q['question_id'] for q in questions}
         question_claim_ids = {c.claim_id for c in synthesis.question_claims}
         for index, action in enumerate(synthesis.conditional_actions):
@@ -120,8 +130,16 @@ def ground_synthesis(synthesis, reviews, evidence, patient):
         urls = re.findall(r"https?://[^\s<>\"\]]+", claim["text"])
         if any(url.rstrip("/.,)") not in known_urls for url in urls):
             objections[claim["claim_id"]].append("unregistered URL in claim")
-    if questions:
+    for index, action in enumerate(synthesis.conditional_actions):
+        if action.decision_mode == 'SINGLE_BEST' and not any(
+                q['question_id'] in action.question_ids and q['type'] == 'DECISION' for q in questions):
+            target = next(c for c in claims if c['location'] == f'conditional_actions.{index}.action')
+            objections[target['claim_id']].append('single-best choice requires an explicit personal decision question')
+    if questions or synthesis.question_claims:
         by_id = {c.claim_id: c for c in synthesis.question_claims}
+        questions_by_id = {q['question_id']: q for q in questions}
+        from .questions import evaluate_question
+        available = available_references(patient, evidence)
         for index, action in enumerate(synthesis.conditional_actions):
             target = next(c for c in claims if c['location'] == f'conditional_actions.{index}.action')
             for identifier in action.claim_ids:
@@ -129,6 +147,18 @@ def ground_synthesis(synthesis, reviews, evidence, patient):
                 if (dependency is None or dependency.status not in ('ANSWER', 'CONDITIONAL')
                         or dependency.question_id not in action.question_ids or objections.get(identifier)):
                     objections[target['claim_id']].append('action depends on a non-answer, mismatched or rejected claim')
+            covered_questions = {by_id[identifier].question_id for identifier in action.claim_ids
+                                 if identifier in by_id and not objections.get(identifier)
+                                 and by_id[identifier].status in ('ANSWER', 'CONDITIONAL')}
+            if set(action.question_ids) - covered_questions:
+                objections[target['claim_id']].append('every action question requires answering support')
+            if action.decision_mode == 'SINGLE_BEST':
+                for question_id in action.question_ids:
+                    question = questions_by_id.get(question_id)
+                    if question and question['type'] == 'DECISION':
+                        readiness = evaluate_question(question, available=available, decision_mode='SINGLE_BEST')
+                        if readiness.status != 'ANSWER':
+                            objections[target['claim_id']].extend(('single-best choice lacks personal decision conditions', *readiness.reasons))
     payload = synthesis.model_dump(mode="json")
     withheld = []
     withheld_actions = set()
@@ -137,14 +167,15 @@ def ground_synthesis(synthesis, reviews, evidence, patient):
         if not reasons:
             continue
         withheld.append(WithheldClaim(claim_id=claim["claim_id"], location=claim["location"],
-                                     original_text=claim["text"], reasons=tuple(dict.fromkeys(reasons))))
+                                     original_text=claim["text"], reasons=tuple(dict.fromkeys(reasons)),
+                                     status=statuses[claim['claim_id']]))
         path = [int(item) if item.isdigit() else item for item in claim["location"].split(".")]
         target = payload
         for key in path[:-1]:
             target = target[key]
         target[path[-1]] = f"판단 보류 ({claim['claim_id']})"
         if path[0] == 'question_claims':
-            target['status'] = 'MISSING_DATA'
+            target['status'] = statuses[claim['claim_id']]
         if path[0] == "conditional_actions":
             withheld_actions.add(path[1])
     for index in withheld_actions:

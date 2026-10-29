@@ -586,17 +586,11 @@ def _reviewed_references(ledger, case_id):
         context = _latest_context(ledger, case_id)
     except KeyError:
         context = {}
-    # Preserve exact IDs. Legacy records without IDs are not assigned new IDs.
-    facts = frozenset(item["fact_id"] for item in context.get("fact_details", ())
-        if item.get("fact_id") and item.get("user_confirmed") is True)
-    # measurement_id is a display label in Slicer exports, not the canonical
-    # reviewed observation identity supplied by _latest_context.
-    measurements = frozenset(item["fact_id"] for review in context.get("imaging_reviews", ())
-        if review.get("review_status") in {"USER_REVIEWED", "EXPERT_REVIEWED"}
-        for item in review.get("measurements", ())
-        if item.get("fact_id"))
+    # Share the runtime's reviewed and patient-eligibility boundary; preserve exact IDs.
+    from .question_runtime import available_references
+    refs = available_references(context)
     evidence = frozenset(item["evidence_id"] for item in context.get("evidence_cards", ()) if item.get("evidence_id"))
-    return AvailableReferences(fact_ids=facts, measurement_ids=measurements, evidence_ids=evidence)
+    return AvailableReferences(fact_ids=refs.fact_ids, measurement_ids=refs.measurement_ids, evidence_ids=evidence)
 
 
 def _summary(projection):

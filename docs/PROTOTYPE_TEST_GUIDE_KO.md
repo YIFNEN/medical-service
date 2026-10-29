@@ -89,6 +89,20 @@ q-prognosis는 horizon/outcome/treatment_state가 없어 보류가 정상이다.
 원문 검수 후 질문 `allowed_fact_ids`와 `allowed_measurement_ids`에는 실제 저장소 ID만 연결한다.
 그 질문에 필요한 조건이 갖춰지면 관련 질문만 분석 가능해진다.
 
+질문별 판단·행동 연결 회귀는 다음 명령으로 따로 확인한다.
+
+```powershell
+& $Python -X utf8 -m pytest -q tests/test_question_grounding_pipeline.py tests/test_question_runtime.py
+```
+
+합격 기준은 잘못된 인용·불충분한 질문 하나가 다른 질문의 답변을 지우지 않는 것이다.
+행동에 여러 question ID가 있으면 각 질문의 유효한 답변 claim ID가 필요하다.
+`OPTIONS`는 조건부 선택지의 표시 순서이며, `SINGLE_BEST`는 개인 목표·제약·우선순위가 있는 DECISION 질문을 요구한다.
+모델이 numeric_support.model_validated를 true로 적는 것만으로 수치 모델이 검증되지는 않는다.
+현재 프로토타입에는 독립 검증된 개인 수치 모델이 연결되지 않았으므로 개인 위험·NNT·절대 인과효과 추정은 최종 주장으로 통과시키지 않는다.
+구조적 계약 검사 통과와 임상적 수치 검증을 구분한다.
+중복 claim ID는 보류하며 보고서의 occurrence_id와 question_id로 각각 추적한다.
+
 원문 추출·검수 후 `source-review.json`을 개인 저장소에 복사하여 fact ID·환자/episode/epoch·부위·좌우와 의미를 수정한다.
 
 ```powershell
@@ -234,6 +248,15 @@ Copy-Item tests\fixtures\prototype\blind-review.json $BlindReview
 위 명령은 견적뿐이다. 별도 승인 후 같은 명령에 `--approve-cost --approve-transmission --budget-usd 승인액 --approval-id 새승인ID`를 붙인다.
 검색식 검토·재개는 8절과 같다. 해시·cutoff가 고정되고 완료된 세 제공자 결과만 BLIND_RESULT_SEALED로 봉인한다.
 가림 mode의 문장 일치 검사는 완전한 의미적 비식별/가림 보장을 뜻하지 않으므로 입력 분류의 사람 검수가 필요하다.
+
+```powershell
+& $Python -X utf8 -m pytest -q tests/test_blind_pipeline.py tests/test_blinding.py
+```
+
+이 시험은 네트워크 연결을 차단하고 녹화 응답으로 검색 계획→선별→세 제공자 판단→보고서→봉인·비교를 확인한다.
+가린 문장이 검색식·중첩 메타데이터·모델 출력에 다시 나타나면 다음 외부 호출 전에 중단해야 한다.
+JSON 이스케이프 해석은 최대 16겹이며 더 깊으면 미승인 입력으로 중단한다.
+23개 종단 시나리오 통과는 의미적 가림·임상 정확도의 검증이 아니다.
 
 ```powershell
 & $Python -X utf8 -m medic compare-clinician blind-001 --store $Store
