@@ -33,7 +33,7 @@ from .research_contracts import (
 
 T = TypeVar("T", bound=BaseModel)
 PROVIDERS = ("openai", "anthropic", "google")
-PROMPT_VERSION = "medic-agent-first/4.1"
+PROMPT_VERSION = "medic-agent-first/4.2"
 
 
 def blind_opinion_id(reviewer: str, opinion_id: str) -> str:
@@ -209,6 +209,12 @@ class TribunalService:
             "If scoped_questions are supplied, return question_claims conforming to question_claim_schema, at least one per question. "
             "Use only each question's allowed IDs. Record MISSING_DATA or SYSTEM_FAILURE separately. "
             "Link every conditional_actions question_id to its own answering supporting claim. "
+            "For information gathering, return additional_tests with the unresolved question ID, exact test name, "
+            "result-dependent decision changes, burdens, urgency, alternatives and question-allowed citations. "
+            "Use action_kind ADDITIONAL_TEST, one proposal_id, the identical test name, matching question_ids, "
+            "empty claim_ids and OPTIONS mode. This can address a MISSING_DATA question without asserting its answer. "
+            "A test requires an unresolved question claim or an explicit remaining uncertainty in an accepted answer. "
+            "Never use a test proposal to authorize treatment. All proposal components require source review. "
             "Use decision_mode OPTIONS for conditional options; SINGLE_BEST requires the personal goals, constraints and priorities. "
             "Ranking is presentation order, not an invented patient utility. Never invent missing conditions or personal numeric risks.",
             {"revised_opinions": tuple(revisions.values()), "peer_reviews": peer_reviews, "evidence": evidence_cards,
@@ -339,7 +345,7 @@ class TribunalService:
         def walk(item: Any) -> None:
             if isinstance(item, dict):
                 for key, child in item.items():
-                    if key == 'question_claims':
+                    if key in ('question_claims', 'additional_tests'):
                         continue  # question claims receive claim-local scope/citation validation
                     if key == 'claim_reviews' and isinstance(value, SynthesisReview):
                         continue  # invalid audit citations withhold only the audited claim

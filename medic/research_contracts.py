@@ -10,7 +10,7 @@ from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, HttpUrl, field
 
 
 from .model_base import StrictFrozenModel
-from .questions import QuestionClaim
+from .questions import AdditionalTestProposal, QuestionClaim
 
 
 ANKLE_REVIEW_DOMAINS = (
@@ -242,6 +242,8 @@ class ConditionalAction(StrictFrozenModel):
     question_ids: tuple[str, ...] = ()
     claim_ids: tuple[str, ...] = ()
     decision_mode: Literal['OPTIONS', 'SINGLE_BEST'] = 'OPTIONS'
+    action_kind: Literal['TREATMENT_OR_MANAGEMENT', 'ADDITIONAL_TEST'] = 'TREATMENT_OR_MANAGEMENT'
+    proposal_ids: tuple[str, ...] = ()
 
 
 class ProposedSynthesis(StrictFrozenModel):
@@ -255,6 +257,7 @@ class ProposedSynthesis(StrictFrozenModel):
     conditional_actions: tuple[ConditionalAction, ...] = Field(min_length=1)
     evidence_ids: tuple[str, ...]
     question_claims: tuple[QuestionClaim, ...] = ()
+    additional_tests: tuple[AdditionalTestProposal, ...] = ()
 
     @model_validator(mode="after")
     def require_ranked_matching_actions(self) -> "ProposedSynthesis":

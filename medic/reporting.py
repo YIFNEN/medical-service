@@ -83,6 +83,9 @@ def _conditional_action_details(values) -> str:
             _detail("장점", action.benefits),
             _detail("단점", action.downsides),
             _detail("근거 ID", action.evidence_ids),
+            _detail("질문 ID", action.question_ids),
+            _detail("주장 ID", action.claim_ids),
+            _detail("추가검사 제안 ID", action.proposal_ids),
             "",
         ))
     return "\n".join(lines).rstrip()
@@ -90,6 +93,25 @@ def _conditional_action_details(values) -> str:
 def _items(values: Iterable[str], empty: str = "기록 없음") -> str:
     items = tuple(values)
     return "\n".join(f"- {_safe_text(value)}" for value in items) if items else f"- {empty}"
+
+
+def _additional_test_details(proposals):
+    lines = ['### 추가검사 제안 (진단 확정·검사 시행 명령과 구분)', '']
+    for proposal in proposals:
+        lines.extend([
+            f"#### {_safe_text(proposal.proposal_id)} · {_safe_text(proposal.test)}",
+            f"질문 ID: {_safe_text(proposal.question_id)} / {_safe_text(proposal.question)}", '',
+            _detail('결과에 따른 판단 변경',
+                    (f'{b.result} → {b.change}' for b in proposal.results_change)),
+            _detail('부담', proposal.burdens),
+            f"긴급도: {_safe_text(proposal.urgency)}", '',
+            _detail('대안', proposal.alternatives),
+            _detail('자료·계측·근거 ID', (*proposal.citations.fact_ids,
+                    *proposal.citations.measurement_ids, *proposal.citations.evidence_ids)),
+        ])
+    if not proposals:
+        lines.append('- 기록 없음')
+    return '\n'.join(lines)
 
 
 def _strict_strings(value: object, field_name: str) -> tuple[str, ...]:
@@ -325,6 +347,7 @@ class ReportRenderer:
                 "## 10. 결론을 바꿀 추가자료와 정보가치",
                 "",
                 _items(report.synthesis.decision_changers),
+                _additional_test_details(report.synthesis.additional_tests),
                 "",
                 "## 11. 최신 근거와 직접 링크",
                 "",

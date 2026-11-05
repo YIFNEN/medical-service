@@ -22,6 +22,15 @@ def synthesis_claims(synthesis):
                 add(f"conditional_actions.{index}.{field}.{offset}", value)
     for index, claim in enumerate(synthesis.question_claims):
         add(f'question_claims.{index}.text', claim.text, claim.claim_id)
+    for index, proposal in enumerate(synthesis.additional_tests):
+        for field in ('test', 'question', 'urgency'):
+            add(f'additional_tests.{index}.{field}', getattr(proposal, field))
+        for field in ('burdens', 'alternatives'):
+            for offset, value in enumerate(getattr(proposal, field)):
+                add(f'additional_tests.{index}.{field}.{offset}', value)
+        for offset, branch in enumerate(proposal.results_change):
+            for field in ('result', 'change'):
+                add(f'additional_tests.{index}.results_change.{offset}.{field}', getattr(branch, field))
     return tuple(claims)
 
 
@@ -53,6 +62,12 @@ def _fulltext_supports(audit, cited):
         if required <= verified:
             return True
     return False
+
+
+def _proposal_audit_outside_scope(audit, proposal):
+    return (set(audit.evidence_ids) - set(proposal.citations.evidence_ids)
+            or set(audit.patient_fact_ids) - set((*proposal.citations.fact_ids,
+                                                *proposal.citations.measurement_ids)))
 
 
 def ground_synthesis(synthesis, reviews, evidence, patient):
@@ -99,6 +114,30 @@ def ground_synthesis(synthesis, reviews, evidence, patient):
             raise ValueError("evidence contradiction is not localized to a claim")
     known_urls = {str(card.url).rstrip("/") for card in evidence}
     questions = patient.get('scoped_questions', patient.get('typed_questions', ()))
+    from .questions import QuestionContract, _parse, _reference_reasons
+    from .question_runtime import available_references
+    available = available_references(patient, evidence)
+    questions_by_id = {q['question_id']: _parse(QuestionContract, q) for q in questions}
+    proposal_counts = {}
+    for proposal in synthesis.additional_tests:
+        proposal_counts[proposal.proposal_id] = proposal_counts.get(proposal.proposal_id, 0) + 1
+    for index, proposal in enumerate(synthesis.additional_tests):
+        reasons = []
+        question = questions_by_id.get(proposal.question_id)
+        if question is None:
+            reasons.append('additional test requires an allowed question')
+        if proposal_counts[proposal.proposal_id] != 1:
+            reasons.append('duplicate additional test proposal ID')
+        reasons.extend(_reference_reasons(proposal.citations, question, available))
+        if not any((proposal.citations.fact_ids, proposal.citations.measurement_ids, proposal.citations.evidence_ids)):
+            reasons.append('additional test requires explicit source references')
+        for item in claims:
+            if item['location'].startswith(f'additional_tests.{index}.'):
+                objections[item['claim_id']].extend(reasons)
+                for review in reviews:
+                    audit = next(a for a in review.claim_reviews if a.claim_id == item['claim_id'])
+                    if _proposal_audit_outside_scope(audit, proposal):
+                        objections[item['claim_id']].append('additional test audit uses references outside declared question-scoped citations')
     if questions or synthesis.question_claims:
         from .question_runtime import available_references
         from .questions import validate_question_claims
@@ -116,6 +155,8 @@ def ground_synthesis(synthesis, reviews, evidence, patient):
         known_questions = {q['question_id'] for q in questions}
         question_claim_ids = {c.claim_id for c in synthesis.question_claims}
         for index, action in enumerate(synthesis.conditional_actions):
+            if action.action_kind == 'ADDITIONAL_TEST':
+                continue  # proposals are independently grounded below, not diagnostic answers
             claim = next(c for c in claims if c['location'] == f'conditional_actions.{index}.action')
             if not action.question_ids or set(action.question_ids) - known_questions:
                 objections[claim['claim_id']].append('action is not linked to allowed questions')
@@ -141,6 +182,8 @@ def ground_synthesis(synthesis, reviews, evidence, patient):
         from .questions import evaluate_question
         available = available_references(patient, evidence)
         for index, action in enumerate(synthesis.conditional_actions):
+            if action.action_kind == 'ADDITIONAL_TEST':
+                continue
             target = next(c for c in claims if c['location'] == f'conditional_actions.{index}.action')
             for identifier in action.claim_ids:
                 dependency = by_id.get(identifier)
@@ -159,6 +202,47 @@ def ground_synthesis(synthesis, reviews, evidence, patient):
                         readiness = evaluate_question(question, available=available, decision_mode='SINGLE_BEST')
                         if readiness.status != 'ANSWER':
                             objections[target['claim_id']].extend(('single-best choice lacks personal decision conditions', *readiness.reasons))
+    # If any required branch or burden fails, do not publish the rest as an accepted test.
+    invalid_proposals = set()
+    for index, proposal in enumerate(synthesis.additional_tests):
+        items = [c for c in claims if c['location'].startswith(f'additional_tests.{index}.')]
+        unresolved = False
+        for offset, answer in enumerate(synthesis.question_claims):
+            claim = next(c for c in claims if c['location'] == f'question_claims.{offset}.text')
+            if (answer.question_id == proposal.question_id and not objections[claim['claim_id']]
+                    and (answer.status in ('MISSING_DATA', 'CONFLICT', 'CONDITIONAL')
+                         or (answer.status == 'ANSWER' and any(
+                             value != 'NOT_ASSESSED' for value in answer.uncertainty.model_dump().values())))):
+                unresolved = True
+        if not unresolved:
+            for item in items:
+                objections[item['claim_id']].append('additional test requires an unresolved question or explicit remaining uncertainty')
+        if any(objections[c['claim_id']] for c in items):
+            invalid_proposals.add(proposal.proposal_id)
+            for item in items:
+                objections[item['claim_id']].append('additional test proposal has an unverified required component')
+    proposals = {p.proposal_id: p for p in synthesis.additional_tests}
+    for index, action in enumerate(synthesis.conditional_actions):
+        target = next(c for c in claims if c['location'] == f'conditional_actions.{index}.action')
+        if action.action_kind != 'ADDITIONAL_TEST':
+            if action.proposal_ids:
+                objections[target['claim_id']].append('test proposal cannot authorize treatment or management')
+            continue
+        linked = [proposals[pid] for pid in action.proposal_ids if pid in proposals]
+        if (len(linked) != 1 or len(action.proposal_ids) != 1
+                or action.proposal_ids[0] in invalid_proposals
+                or proposal_counts.get(action.proposal_ids[0]) != 1
+                or set(action.question_ids) != {linked[0].question_id}
+                or action.action != linked[0].test
+                or action.claim_ids or action.decision_mode != 'OPTIONS'):
+            objections[target['claim_id']].append('information gathering requires one verified same-question proposal, exact test name and OPTIONS mode; not a diagnostic answer')
+        if len(linked) == 1:
+            for item in claims:
+                if item['location'].startswith(f'conditional_actions.{index}.'):
+                    for review in reviews:
+                        audit = next(a for a in review.claim_reviews if a.claim_id == item['claim_id'])
+                        if _proposal_audit_outside_scope(audit, linked[0]):
+                            objections[item['claim_id']].append('test action audit uses references outside linked proposal citations')
     payload = synthesis.model_dump(mode="json")
     withheld = []
     withheld_actions = set()
