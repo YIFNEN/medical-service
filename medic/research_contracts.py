@@ -274,6 +274,12 @@ class ClaimQuote(StrictFrozenModel):
     quote: str = Field(min_length=1)
 
 
+class FulltextRequirement(StrictFrozenModel):
+    evidence_id: str = Field(min_length=1)
+    fields: tuple[Literal['study_design', 'population', 'intervention', 'comparator',
+                          'findings', 'effect_estimates', 'limitations'], ...] = Field(min_length=1)
+
+
 class ClaimReview(StrictFrozenModel):
     claim_id: str
     verdict: Literal["SUPPORTED", "UNCERTAIN", "UNSUPPORTED", "CONTRADICTED"]
@@ -284,6 +290,7 @@ class ClaimReview(StrictFrozenModel):
     requires_fulltext_verification: bool = False
     required_evidence_fields: tuple[Literal['study_design', 'population', 'intervention', 'comparator',
                                           'findings', 'effect_estimates', 'limitations'], ...] = ()
+    fulltext_requirements: tuple[FulltextRequirement, ...] = ()
 
 
 class WithheldClaim(StrictFrozenModel):

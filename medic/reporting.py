@@ -329,6 +329,24 @@ class ReportRenderer:
                 _detail("근거 ID", review.evidence_ids),
                 "",
             ))
+            for audit in review.claim_reviews:
+                cited = [card for card in report.evidence_cards if card.evidence_id in audit.evidence_ids]
+                if not (audit.requires_fulltext_verification or audit.required_evidence_fields
+                        or audit.fulltext_requirements or any(card.fulltext_required for card in cited)):
+                    continue
+                lines.extend([
+                    '##### 주장별 전문 검증 요청',
+                    f"주장 ID: {_safe_text(audit.claim_id)} / 검토 의견: {_safe_text(audit.verdict)}", '',
+                    f"인용 전체의 전문 검증 요청: {_safe_text(audit.requires_fulltext_verification)}",
+                    _detail('인용 전체의 필수 항목', audit.required_evidence_fields),
+                    _detail('논문별 필수 항목', (f'{r.evidence_id}: {", ".join(r.fields)}'
+                            for r in audit.fulltext_requirements)),
+                    _detail('카드 자체가 전문 검증을 요구하는 출처',
+                            (card.evidence_id for card in cited if card.fulltext_required)),
+                    _detail('검토에 사용한 원문 구절',
+                            (f'{q.evidence_id}: {q.quote}' for q in audit.source_quotes)),
+                    '요청·검토 의견은 최종 통과를 뜻하지 않음. 아래 보류 이유와 출처별 실제 분석 범위를 함께 확인.', '',
+                ])
         for claim in report.withheld_claims:
             lines.extend([f"### 보류된 주장: {_safe_text(claim.claim_id)}",
                           f"검증 전 원문 (결론으로 채택하지 않음): {_safe_text(claim.original_text)}",

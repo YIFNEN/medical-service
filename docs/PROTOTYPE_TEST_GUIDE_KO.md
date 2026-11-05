@@ -121,6 +121,22 @@ pytest 임시 저장소에 `runs/test-proposals/ledger.jsonl`을 만들고 13개
 정책 4.2 이전 실행의 보고서는 열 수 있지만 새 정책의 판단은 새 run으로 생성한다.
 실제 모델의 검사 제안 품질과 임상 적절성은 이 합성 시험으로 검증되지 않는다.
 
+논문별 필요한 전문 구간의 검증은 다음 합성 시험으로 확인한다:
+
+```powershell
+& $Python -X utf8 -m pytest -q tests/test_fulltext_claim_requirements.py tests/test_literature_integrity.py
+```
+
+`claim_reviews[].fulltext_requirements`의 형식은 `[{"evidence_id":"실제 근거 ID","fields":["population","findings"]}]`이다.
+이 필드는 읽어야 할 구간의 요건이며 전문 확보·분석 완료 선언이 아니다.
+전역 `requires_fulltext_verification`/`required_evidence_fields`는 인용 전체에 적용한다.
+출처별 요구 항목이 모두 검증되고, 원문 구절과 유효한 문자 범위·분석 구간·카드/필드의 원본 해시가 연결돼야 통과한다.
+접근·분석 범위를 `FULL_TEXT`라고 표시하는 것만으로 통과하지 않는다.
+합격은 한 편의 전문으로 다른 미분석 논문을 통과시키지 않고, 필요한 부분 전문은 사용하며, 구간·해시·필수 항목 실패는 해당 주장만 보류하는 것이다.
+보고서 '주장별 전문 검증 요청'에는 주장 ID·요건·검토 구절이 남는다. 검토 의견과 최종 통과는 구분한다.
+실패 시 출처 ID·분석 문자 구간·필드 근거를 확인한다. 요건을 없애거나 다른 논문의 근거로 대체하지 않는다.
+새 정책 4.3은 새 run에 적용한다. 문헌의 실제 의미·표의 임상 해석·환자 적용성은 추가 실제 검증 대상이다.
+
 원문 추출·검수 후 `source-review.json`을 개인 저장소에 복사하여 fact ID·환자/episode/epoch·부위·좌우와 의미를 수정한다.
 
 ```powershell

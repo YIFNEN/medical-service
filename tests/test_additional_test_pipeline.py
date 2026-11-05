@@ -162,4 +162,3 @@ def test_recorded_tribunal_report_and_resume_include_test_proposal(tmp_path, bad
         assert 'Synthetic burden' in markdown
         assert 'Discuss at planned review' in markdown
         assert 'Review existing observations' in markdown
-

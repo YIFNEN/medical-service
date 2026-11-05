@@ -47,19 +47,56 @@ def known_patient_fact_ids(patient):
 
 
 def _fulltext_supports(audit, cited):
+    cards = {card.evidence_id: card for card in cited}
+    requirements = {}
+    for requirement in audit.fulltext_requirements:
+        if requirement.evidence_id not in cards or requirement.evidence_id in requirements:
+            return False
+        requirements[requirement.evidence_id] = set(requirement.fields)
+    default = set(audit.required_evidence_fields or ('population', 'study_design', 'findings'))
     for card in cited:
-        if card.analysis_scope == 'FULL_TEXT' and not audit.required_evidence_fields:
-            return True
+        if audit.requires_fulltext_verification or audit.required_evidence_fields or card.fulltext_required:
+            requirements.setdefault(card.evidence_id, default)
+        if audit.required_evidence_fields and card.evidence_id in requirements:
+            requirements[card.evidence_id].update(audit.required_evidence_fields)
+    if not requirements:
+        return False
+    for evidence_id, required in requirements.items():
+        card = cards[evidence_id]
         if card.access_level != 'FULL_TEXT' or card.analysis_scope not in ('FULL_TEXT', 'PARTIAL_FULL_TEXT'):
-            continue
-        required = set(audit.required_evidence_fields or ('population', 'study_design', 'findings'))
+            return False
         quoted = {q.quote for q in audit.source_quotes if q.evidence_id == card.evidence_id}
         verified = set()
         for field in card.field_support:
-            if (field.quote in quoted and field.source_start is not None and field.source_end is not None
-                    and card.source_text[field.source_start:field.source_end] == field.quote):
+            if (field.quote in quoted and _verified_fulltext_field(card, field)):
                 verified.add(field.field)
-        if required <= verified:
+        if not required <= verified:
+            return False
+    return True
+
+
+def _verified_fulltext_field(card, field):
+    start, end = field.source_start, field.source_end
+    if (start is None or end is None or not 0 <= start < end <= len(card.source_text)
+            or card.source_text[start:end] != field.quote
+            or not card.source_sha256 or field.source_sha256 != card.source_sha256):
+        return False
+    # The source hash refers to the acquired raw XML/PDF, not to extracted text.
+    # Cover only recorded analyzed character ranges, including adjacent chunks.
+    ranges = []
+    for locator in card.analyzed_locators:
+        match = re.fullmatch(r'text:characters:(\d+)-(\d+)', locator)
+        if match:
+            left, right = map(int, match.groups())
+            if 0 <= left < right <= len(card.source_text):
+                ranges.append((left, right))
+    covered = start
+    for left, right in sorted(ranges):
+        if left > covered:
+            break
+        if right > covered:
+            covered = right
+        if covered >= end:
             return True
     return False
 
@@ -93,7 +130,8 @@ def ground_synthesis(synthesis, reviews, evidence, patient):
             if not audit.source_quotes and not audit.patient_fact_ids:
                 reasons.append("no source quote or patient fact supporting the claim")
             cited = [cards[eid] for eid in audit.evidence_ids if eid in cards]
-            needs_fulltext = audit.requires_fulltext_verification or bool(audit.required_evidence_fields) or any(c.fulltext_required for c in cited)
+            needs_fulltext = (audit.requires_fulltext_verification or bool(audit.required_evidence_fields)
+                              or bool(audit.fulltext_requirements) or any(c.fulltext_required for c in cited))
             if needs_fulltext and not _fulltext_supports(audit, cited):
                 reasons.append('claim requires full text verification of necessary methods/results; verified passages are incomplete')
             if any(c.publication_status == 'RETRACTED' or (c.publication_status in {'CORRECTION_REQUIRES_REVIEW', 'EXPRESSION_OF_CONCERN'}

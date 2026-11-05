@@ -25,10 +25,12 @@ def test_partial_paper_supports_only_claims_with_verified_required_fields():
     card = fixtures.TribunalTests().evidence()
     text = 'Adults; observational cohort; union.'
     fields = tuple(EvidenceFieldSupport(field=field, value=quote, quote=quote,
-                                        source_start=text.index(quote), source_end=text.index(quote)+len(quote))
+                                        source_start=text.index(quote), source_end=text.index(quote)+len(quote),
+                                        source_sha256='sha256:synthetic-raw')
                    for field, quote in [('population', 'Adults'), ('study_design', 'observational cohort'), ('findings', 'union')])
     card = card.model_copy(update={'access_level': 'FULL_TEXT', 'analysis_scope': 'PARTIAL_FULL_TEXT',
         'fulltext_required': True, 'source_text': text, 'field_support': fields,
+        'source_sha256': 'sha256:synthetic-raw',
         'analyzed_locators': (f'text:characters:0-{len(text)}',)})
     synthesis = ProposedSynthesis.model_validate_json(json.dumps(fixtures.synthesis()))
     payload = fixtures.synthesis_review('openai')

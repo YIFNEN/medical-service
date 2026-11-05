@@ -33,7 +33,7 @@ from .research_contracts import (
 
 T = TypeVar("T", bound=BaseModel)
 PROVIDERS = ("openai", "anthropic", "google")
-PROMPT_VERSION = "medic-agent-first/4.2"
+PROMPT_VERSION = "medic-agent-first/4.3"
 
 
 def blind_opinion_id(reviewer: str, opinion_id: str) -> str:
@@ -237,6 +237,10 @@ class TribunalService:
                 "A matching quote is insufficient if it does not entail the claim. Never treat model agreement as truth. "
                 "Set requires_fulltext_verification for consequential numeric thresholds, treatment effect/risk comparisons "
                 "and uncertain individual applicability. Distinguish descriptive patient measurements from literature thresholds. "
+                "Specify fulltext_requirements per evidence_id with the necessary fields for that paper. "
+                "Do not pool methods/results across different papers or use a complete paper to validate an unread one. "
+                "Global requires_fulltext_verification or required_evidence_fields requires verification for every cited paper. "
+                "Necessary verified passages in PARTIAL_FULL_TEXT can suffice; FULL_TEXT alone is not proof of a claim. "
                 "Localize every error to claim_reviews so the affected claim can be withheld independently.",
                 {"synthesis": synthesis, "claims": synthesis_claims(synthesis), "patient": patient_context,
                  "own_revised_opinion": revisions[provider], "evidence": evidence_cards},
