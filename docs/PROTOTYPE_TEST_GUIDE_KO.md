@@ -7,6 +7,17 @@
 이 문서는 구현과 함께 누적한다. 각 단계의 미구현·미검증 상태는 [진행 기록](IMPLEMENTATION_STATUS_KO.md)을 확인한다.
 아래 설치/합성/견적 명령은 유료 생성 호출이나 개인 자료 전송을 하지 않는다.
 
+## 다음 시험에서 사용자가 준비할 항목
+
+| 순서 | 직접 준비할 항목 | 확인할 결과 |
+|---|---|---|
+| M1 합성 연결 시험 | OpenAI·Anthropic·Gemini API 키와 사용할 프로젝트의 결제 설정. 견적을 본 뒤 합성 시험 비용 상한 결정 | 같은 PowerShell에서 `doctor`의 세 `key_available`이 `true`. 시험 후 세 제공자가 `PASSED` |
+| M5 수동 계측 | 로컬 CT 한 시리즈의 대상·좌우 확인. Slicer에서 두 점 거리 또는 세 점 각도의 기준점과 측정 방법 기록 | 내보낸 `review.json`을 가져와 `review ID` 확인. 비교 조건을 갖춘 두 시점이 있으면 각각 계측 |
+| M7 실자료 시험 | 동일 사례의 대표 문서 최대 3개, CT 1개, 확인할 질문과 개인 목표·제약. 문서 추출과 판단의 전송 범위 및 예산을 각각 결정 | 원문 연결, 검수, 질문, 근거, 세 모델 검토, 보고서, 봉인 후 비교를 확인 |
+
+처음에는 [8절의 키 설정과 합성 시험 견적](#8-비용전송-승인-후-실제-제공자-시험), 또는 [6절의 로컬 계측](#6-slicer-합성-왕복과-수동-계측) 중 준비된 쪽부터 진행한다. 두 시험은 독립적으로 진행할 수 있다.
+진행을 맡길 때는 키 원문 대신 `doctor`의 키 존재 여부, 승인할 단계와 USD 상한을 알려준다. 영상은 로컬에서 검수하고 필요한 경우 review ID와 measurement ID를 사용한다.
+
 ## 1. 설치와 준비
 
 저장소 루트에서 PowerShell:
@@ -225,6 +236,19 @@ $ReviewPath = Read-Host 'Slicer가 출력한 review.json 절대 경로'
 이 절은 자동 실행하지 않는다. 설정 모델·현재 가격·키와 승인한 전송 범위를 확인한 후 사용자가 수행한다.
 가격/모델은 `MEDIC_MODEL_REGISTRY` JSON으로 고정한다. 설정 가격은 실제 청구액 보장이 아니다.
 
+키는 제공자 콘솔에서 발급하고 MEDIC를 실행할 PowerShell에서 아래처럼 입력한다. 프롬프트는 입력을 숨기며 환경변수는 현재 셸과 그 자식 프로세스에만 전달된다. 키를 채팅, 저장소, registry JSON에 적지 않는다.
+
+```powershell
+$env:OPENAI_API_KEY = ([pscredential]::new('api', (Read-Host 'OpenAI API key' -AsSecureString))).GetNetworkCredential().Password
+$env:ANTHROPIC_API_KEY = ([pscredential]::new('api', (Read-Host 'Anthropic API key' -AsSecureString))).GetNetworkCredential().Password
+$env:GEMINI_API_KEY = ([pscredential]::new('api', (Read-Host 'Gemini API key' -AsSecureString))).GetNetworkCredential().Password
+& $Python -X utf8 -m medic doctor --store $Store
+```
+
+이 방식으로 설정한 키는 별도로 시작한 Codex 세션에 자동 전달되지 않는다. 이 경우 위 PowerShell에서 직접 시험을 실행한다. 별도 registry를 사용한다면 `api_key_env`에 지정한 이름과 일치시킨다. 시험이 끝나면 셸을 닫아 해당 세션의 키를 지운다.
+
+실행 전 선택한 프로젝트의 모델 접근 권한과 요금제를 확인한다. 공개 단가의 출처는 다음과 같다. [OpenAI API 가격](https://developers.openai.com/api/docs/pricing) · [Anthropic API 가격](https://platform.claude.com/docs/en/about-claude/pricing) · [Gemini API 가격](https://ai.google.dev/gemini-api/docs/pricing.md)
+
 먼저 합성 입력만 사용하는 smoke 견적:
 
 ```powershell
@@ -239,6 +263,7 @@ $SmokeBudget = [double](Read-Host '별도로 승인한 smoke 예산 USD')
 ```
 
 세 제공자 PASSED, 모델·응답 ID·사용량을 확인한다. 한 제공자 실패는 INCOMPLETE이고 같은 ID 재실행은 완료 호출을 재사용한다.
+결과를 공유할 때는 run ID, 제공자별 상태와 실패 유형만 사용한다. 합성 시험 승인은 실제 자료의 추출·판단과 별도로 다룬다.
 키 없음·미지원 모델·스키마·잘린 응답이면 설정을 수정하고 예산/모델을 바꿀 경우 새 run ID를 만든다.
 
 실제 문서 추출은 견적부터 확인:
