@@ -106,12 +106,13 @@ git clone https://github.com/YIFNEN/medical-service.git
 cd medical-service
 py -3.12 -m venv .venv
 & .\.venv\Scripts\Activate.ps1
-python -m pip install -e ".[test]"
+python -m pip install -e ".[test,legacy-providers]"
 python -m pytest -q
 python -m medic.cli --help
 ```
 
 `scripts/`를 사용하는 Slicer 연동을 위해 저장소에서 editable 설치로 실행합니다. Slicer는 별도 설치가 필요하며 일반 pytest는 실제 Slicer를 자동 실행하지 않습니다.
+전체 시험에는 과거 제공자 어댑터의 호환성 시험이 포함됩니다. OpenAI로 CLI를 실행하려면 `python -m pip install -e .`로 설치합니다.
 
 ### 합성 예제
 

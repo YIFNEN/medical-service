@@ -16,7 +16,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - run: python -m pip install -e ".[test]"
+      - run: python -m pip install -e ".[test,legacy-providers]"
       - run: python -m pytest -q --junitxml=test-results/offline.xml
       - run: python -m medic --help
       - name: Preserve synthetic test results

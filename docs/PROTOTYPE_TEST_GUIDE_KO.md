@@ -24,7 +24,7 @@
 
 ```powershell
 py -3.12 -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -e ".[test]"
+.\.venv\Scripts\python.exe -m pip install -e ".[test,legacy-providers]"
 $Python = (Resolve-Path .\.venv\Scripts\python.exe).Path
 $Store = 'D:\Medic\.medic\prototype'
 & $Python -X utf8 -m medic doctor --store $Store
@@ -34,6 +34,7 @@ $Store = 'D:\Medic\.medic\prototype'
 예상: JSON `network_calls_made: 0`, 패키지 버전, 키의 존재 여부, Slicer 경로·존재 여부.
 `offline_ready`가 false면 누락 패키지/Python/저장 경로를 수정한다.
 키 존재는 실제 모델·가격·승인 검증을 의미하지 않는다. 키 값은 출력하지 않는다.
+위 설치 명령은 기존 제공자 어댑터 호환성을 포함한 전체 시험용이다. OpenAI CLI 실행용은 `python -m pip install -e .`로 설치한다.
 
 ## 2. 키 없는 합성 회귀시험
 
