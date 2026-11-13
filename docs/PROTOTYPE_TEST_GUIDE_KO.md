@@ -234,6 +234,25 @@ $ReviewPath = Read-Host 'Slicer가 출력한 review.json 절대 경로'
 
 ## 8. 비용·전송 승인 후 실제 제공자 시험
 
+### Codex 구독으로 실행
+
+`codex login status`에서 ChatGPT 로그인을 확인한다. MEDIC의 `--backend codex`는 로그인된 로컬 Codex CLI에 각 요청을 전달하고 JSON 스키마로 결과를 검증한다. 현재 선택 모델은 `gpt-6.1-sol`이다. [Codex 인증](https://learn.chatgpt.com/docs/auth) · [Codex 비대화형 실행](https://learn.chatgpt.com/docs/non-interactive-mode)
+
+```powershell
+# 예상 호출 수만 확인
+& $Python -X utf8 -m medic providers smoke --backend codex --run-id codex-check-001 --store $Store
+# 합성 연결 시험 한 건 실행
+& $Python -X utf8 -m medic providers smoke --backend codex --codex-calls 1 --run-id codex-check-001 --store $Store
+# 실자료 판단 단계의 예상 호출 수 확인
+& $Python -X utf8 -m medic deliberate $Case --backend codex --preset pilot --run-id codex-pilot-001 --store $Store
+```
+
+연결 시험의 성공 상태는 `COMPLETE`와 OpenAI 항목의 `PASSED`다. 같은 ID로 실행하면 완료 응답을 재사용한다. 개인 자료는 전송 범위를 승인한 뒤 `review`, `deliberate`, `resume` 또는 AI `compare-clinician`에서 `--backend codex --codex-calls N --approve-transmission`을 지정한다. `N`은 해당 실행에서 허용할 시도 수로 바꾼다. 검색식을 검토한 뒤 재개 시 `--approve-search`를 추가한다.
+
+실패한 시도도 상한에 포함한다. 판단 실행의 모델, 백엔드와 시도 상한은 실행에 고정되며 재개 시 같은 값을 사용한다. 호출 수와 응답의 보고 토큰을 확인할 수 있고, 구독의 남은 한도는 ChatGPT에서 확인한다. 단계별 출력 토큰 수는 프롬프트 목표치다.
+
+### API 키로 실행
+
 이 절은 자동 실행하지 않는다. 설정 모델·현재 가격·키와 승인한 전송 범위를 확인한 후 사용자가 수행한다.
 가격/모델은 `MEDIC_MODEL_REGISTRY` JSON으로 고정한다. 설정 가격은 실제 청구액 보장이 아니다.
 

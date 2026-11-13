@@ -30,6 +30,7 @@ from .research_contracts import EvidenceCard, QuestionSet
 from .tribunal import PROMPT_VERSION, TribunalResult, TribunalService
 from .workflow import ResearchWorkflow
 from .extended_cli import register, execute, budget_arguments, approved_estimate, read_json, run_id
+from .extended_cli import execution_estimate, execution_requested
 from .settings import add_settings_arguments, settings_from_args, has_settings_override, ProcessingSettings
 
 
@@ -120,6 +121,13 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def _cost_payload(estimate: CostEstimate) -> dict[str, Any]:
+    if estimate.backend == 'codex':
+        return {
+            'backend': 'codex', 'billing': 'CHATGPT_PLAN', 'approved': estimate.approved,
+            'call_count': estimate.call_count, 'codex_calls': estimate.codex_calls,
+            'estimated_usd': None, 'paid_calls_made': 0,
+            'instruction': 'Set --codex-calls to bound execution attempts. ChatGPT manages plan usage.',
+        }
     age_days = (date.today() - estimate.pricing_as_of).days
     return {
         "approved": estimate.approved,
@@ -387,21 +395,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         if not case_id or not args.interactive:
             raise ValueError("real-file review requires CASE --interactive")
         registry = ModelRegistry.for_cli()
-        if args.approve_cost and args.budget_usd is None:
+        if args.approve_cost and args.budget_usd is None and args.backend != 'codex':
             raise ValueError('paid calls require --budget-usd')
         try:
             intake = _latest_intake(ledger, case_id)
         except KeyError:
-            if args.approve_cost:
+            if execution_requested(args):
                 raise
             intake = None
         batch_count = len(extraction_batches(intake)) if intake else 1
-        estimate = registry.estimate_extraction_cost(args.input_tokens, batch_count=batch_count)
-        if not args.approve_cost:
+        estimate = execution_estimate(args, registry.estimate_extraction_cost(args.input_tokens, batch_count=batch_count))
+        if not execution_requested(args):
             print(json.dumps({**_cost_payload(estimate), "batch_count": batch_count,
                               "estimate_scope": "all batches; completed calls reused"}, ensure_ascii=False, sort_keys=True))
             return 2
-        gateways = build_live_gateways(registry)
+        gateways = build_live_gateways(registry, backend=estimate.backend)
         service = ClinicalExtractionService(root, gateways, registry)
         extraction = service.extract(intake, approved_estimate(args, estimate))
         context = _interactive_review(service, extraction)
@@ -416,20 +424,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         output = run.model_dump(mode="json")
     elif command == "deliberate":
         registry = ModelRegistry.for_cli()
-        if args.approve_cost and args.budget_usd is None:
-            raise ValueError('paid calls require --budget-usd')
         settings = settings_from_args(args)
         from .questions import CaseQuestionService
         active = CaseQuestionService(ledger).load(args.case).active
         count = 7 + bool(args.question) + (len(active.bundle.questions) if active else 0)
-        estimate = registry.estimate_research_cost(args.input_tokens, settings=settings, question_count=count)
-        if not args.approve_cost:
+        estimate = execution_estimate(args, registry.estimate_research_cost(args.input_tokens, settings=settings, question_count=count))
+        if not execution_requested(args):
             print(json.dumps({**_cost_payload(estimate), 'processing_settings': settings.model_dump(mode='json'),
                               'question_count': estimate.question_count,
                               'estimate_scope': 'bounded batches/chunks and three-role review; questions share prompts; not a billing guarantee'}, ensure_ascii=False, sort_keys=True))
             return 2
         context = _latest_context(ledger, args.case)
-        gateways = build_live_gateways(registry)
+        estimate = approved_estimate(args, estimate)
+        gateways = build_live_gateways(registry, backend=estimate.backend)
         questions = QuestionSet.for_comprehensive_review(args.case, args.question)
         if args.mode == 'clinician-blind':
             if not args.blind_review:
@@ -442,7 +449,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             raise ValueError('--blind-review requires --mode clinician-blind')
         result = ResearchWorkflow(root, gateways, _literature_retriever(settings.max_results), registry).run(
             run_id=args.run_id, case_id=args.case, patient_context=context,
-            question_set=questions, estimate=approved_estimate(args, estimate), settings=settings,
+            question_set=questions, estimate=estimate, settings=settings,
             local_papers=read_json(args.local_papers) if args.local_papers else {},
             search_approved=args.approve_search,
         )
@@ -458,6 +465,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             raise ValueError('run settings are pinned; create a new run to change processing settings')
         run_ledger = AppendOnlyJsonlLedger(root / "runs" / args.run_id / "ledger.jsonl")
         records = run_ledger.records()
+        pinned = next((r['payload']['estimate'] for r in records
+                       if r['kind'] in {'WORKFLOW_CREATED', 'RESEARCH_RUN_CREATED'} and 'estimate' in r['payload']), None)
+        if pinned is not None and args.backend is not None and args.backend != pinned.get('backend', 'api'):
+            raise ValueError('run backend is pinned; create a new run to change it')
         if any(record["kind"] == "TRIBUNAL_COMPLETED" for record in records):
             paths = _render_completed(root, TribunalService.load(root, args.run_id))
             print(json.dumps({"run_id": args.run_id, "resumed": True, "paid_calls_made": 0,
@@ -471,17 +482,21 @@ def main(argv: Sequence[str] | None = None) -> int:
             if not registry.openai_only:
                 raise ValueError('this run uses the previous provider configuration; create a new OpenAI run')
             estimate = CostEstimate.model_validate_json(json.dumps(workflow_manifest["estimate"]))
-            if not args.approve_cost:
+            args.backend = estimate.backend
+            execution_estimate(args, estimate)
+            if not execution_requested(args):
                 print(json.dumps(_cost_payload(estimate.model_copy(update={"approved": False})), ensure_ascii=False))
                 return 2
-            if estimate.budget_usd is None:
+            if estimate.backend == 'api' and estimate.budget_usd is None:
                 raise ValueError('legacy run has no approved budget; create a new run')
             if not args.approve_transmission or not estimate.transmission_approved:
                 raise PermissionError('personal-data transmission approval is required and must be pinned to this run')
             if args.budget_usd is not None and args.budget_usd != estimate.budget_usd:
                 raise ValueError('run budget is pinned; create a new approved run')
+            if args.codex_calls is not None and args.codex_calls != estimate.codex_calls:
+                raise ValueError('Codex attempt limit is pinned; create a new run')
             limit = workflow_manifest["sources"][0]["limit"]
-            result = ResearchWorkflow(root, build_live_gateways(registry), _literature_retriever(limit), registry).run(
+            result = ResearchWorkflow(root, build_live_gateways(registry, backend=estimate.backend), _literature_retriever(limit), registry).run(
                 run_id=args.run_id, case_id=workflow_manifest["case_id"],
                 patient_context=workflow_manifest["patient_context"],
                 question_set=QuestionSet.model_validate_json(json.dumps(workflow_manifest["question_set"])),
@@ -502,16 +517,23 @@ def main(argv: Sequence[str] | None = None) -> int:
         registry = ModelRegistry.model_validate_json(json.dumps(manifest["configuration"]["registry"]))
         if not registry.openai_only:
             raise ValueError('this run uses the previous provider configuration; create a new OpenAI run')
-        estimate = registry.estimate_tribunal_cost(args.input_tokens)
-        if not args.approve_cost:
-            print(json.dumps(_cost_payload(estimate), ensure_ascii=False, sort_keys=True))
+        estimate = CostEstimate.model_validate_json(json.dumps(manifest['estimate']))
+        args.backend = estimate.backend
+        execution_estimate(args, estimate)
+        if not execution_requested(args):
+            print(json.dumps(_cost_payload(estimate.model_copy(update={'approved': False})), ensure_ascii=False, sort_keys=True))
             return 2
+        if estimate.data_scope == 'PERSONAL' and (not args.approve_transmission or not estimate.transmission_approved):
+            raise PermissionError('personal-data transmission approval is required and must be pinned to this run')
+        if ((args.budget_usd is not None and args.budget_usd != estimate.budget_usd)
+                or (args.codex_calls is not None and args.codex_calls != estimate.codex_calls)):
+            raise ValueError('run execution limit is pinned; create a new run')
         questions = QuestionSet.model_validate_json(json.dumps(manifest["question_set"], ensure_ascii=False))
         evidence = tuple(
             EvidenceCard.model_validate_json(json.dumps(item, ensure_ascii=False))
             for item in manifest["evidence_cards"]
         )
-        result = TribunalService(root, build_live_gateways(registry), registry).run(
+        result = TribunalService(root, build_live_gateways(registry, backend=estimate.backend), registry).run(
             run_id=args.run_id, case_id=manifest["case_id"], patient_context=manifest["patient_context"],
             question_set=questions, evidence_cards=evidence, estimate=estimate.approve(),
             search_queries=tuple(manifest.get("search_queries", ())),

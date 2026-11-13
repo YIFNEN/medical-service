@@ -25,6 +25,8 @@ def smoke(root, run_id, gateways, registry, estimate):
         'estimate': estimate.model_dump(mode='json'), 'version': 'medic-smoke/1'})
     result = {'run_id': run_id, 'input_scope': 'SYNTHETIC_ONLY', 'providers': {},
               'status': 'COMPLETE', 'clinical_validation': 'NOT_VALIDATED'}
+    if estimate.backend == 'codex':
+        result['backend'] = 'codex'
     for name, gateway in gateways.items():
         try:
             response = cached_generate(ledger, gateway,
@@ -55,16 +57,15 @@ def execute(args):
     if args.command != 'providers':
         return None
     from .config import ModelRegistry
-    from .extended_cli import approved_estimate
+    from .extended_cli import approved_estimate, execution_estimate, execution_requested
     from .providers import build_live_gateways
     registry = ModelRegistry.for_cli()
     estimate = registry._combine_cost_lines(registry._estimate_extra_stages(args.input_tokens,
         tuple(('provider_smoke', p.provider, 1024) for p in registry.providers)))
-    estimate = estimate.model_copy(update={'data_scope': 'SYNTHETIC'})
-    if not args.approve_cost:
+    estimate = execution_estimate(args, estimate.model_copy(update={'data_scope': 'SYNTHETIC'}))
+    if not execution_requested(args):
         from .cli import _cost_payload
         return 2, {**_cost_payload(estimate), 'input_scope': 'SYNTHETIC_ONLY', 'run_id': args.run_id}
-    if args.budget_usd is None:
-        raise ValueError('paid calls require --budget-usd')
-    result = smoke(args.store, args.run_id, build_live_gateways(registry), registry, approved_estimate(args, estimate))
+    result = smoke(args.store, args.run_id, build_live_gateways(registry, backend=estimate.backend),
+                   registry, approved_estimate(args, estimate))
     return (0 if result['status'] == 'COMPLETE' else 2), result

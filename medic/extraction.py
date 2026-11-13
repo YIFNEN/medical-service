@@ -146,6 +146,7 @@ class ClinicalExtractionService:
         cache_key = deterministic_id("extraction-v2", {
             "intake": intake.intake_id, "registry": self.registry.model_dump(mode="json"),
             "models": {name: gateway.model for name, gateway in self.gateways.items()},
+            **({'backend': estimate.backend} if estimate.backend != 'api' else {}),
             "fact_schema": ClinicalFactBatch.model_json_schema(),
             "reconciliation_schema": FactReconciliation.model_json_schema(),
         })

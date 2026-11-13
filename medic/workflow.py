@@ -25,6 +25,8 @@ class ResearchWorkflow:
             fulltext_limit=None, local_papers=None, resolver=None, search_approved=False, settings=None):
         if not estimate.approved:
             raise PermissionError("explicit cost approval is required before workflow execution")
+        if any(gateway.backend != estimate.backend for gateway in self.gateways.values()):
+            raise ValueError('execution backend does not match the configured gateways')
         from .settings import ProcessingSettings
         requested_settings = settings
         values = (settings or ProcessingSettings()).model_dump(mode='json')
@@ -37,6 +39,10 @@ class ResearchWorkflow:
             raise ValueError("invalid run_id")
         ledger = AppendOnlyJsonlLedger(self.root / "runs" / run_id / "ledger.jsonl")
         saved = next((r["payload"] for r in ledger.records() if r["kind"] == "WORKFLOW_CREATED"), None)
+        if saved is not None and saved['estimate'].get('backend', 'api') != estimate.backend:
+            raise ValueError('run backend is pinned; create a new run')
+        if saved is not None and estimate.backend == 'codex' and saved['estimate']['codex_calls'] != estimate.codex_calls:
+            raise ValueError('Codex attempt limit is pinned; create a new run')
         if saved is not None and 'processing_settings' not in saved:
             search_limit = next((s['limit'] for s in saved.get('sources', ()) if s.get('limit') is not None), 10)
             legacy = ProcessingSettings(max_results=search_limit, evidence_limit=saved['evidence_limit'],

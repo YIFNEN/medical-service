@@ -28,14 +28,14 @@ class CostLine(StrictFrozenModel):
     provider: str
     calls: int
     max_output_tokens: int
-    estimated_usd: float
+    estimated_usd: float | None
 
 
 class CostEstimate(StrictFrozenModel):
     pricing_as_of: date
     lines: tuple[CostLine, ...]
     call_count: int
-    estimated_usd: float
+    estimated_usd: float | None
     approved: bool = False
     budget_usd: float | None = Field(default=None, gt=0, allow_inf_nan=False)
     approval_id: str = 'default'
@@ -44,6 +44,8 @@ class CostEstimate(StrictFrozenModel):
     question_count: int = Field(default=7, ge=1)
     data_scope: Literal['PERSONAL', 'SYNTHETIC'] = 'PERSONAL'
     transmission_approved: bool = False
+    backend: Literal['api', 'codex'] = Field(default='api', exclude_if=lambda value: value == 'api')
+    codex_calls: int | None = Field(default=None, gt=0, exclude_if=lambda value: value is None)
 
     def approve(self) -> "CostEstimate":
         return self.model_copy(update={"approved": True})
@@ -130,7 +132,8 @@ class ModelRegistry(StrictFrozenModel):
             stage=stage, provider=response.provider, model=response.model,
             provider_response_id=response.response_id,
             input_tokens=response.input_tokens, output_tokens=response.output_tokens,
-            estimated_cost_usd=round(cost, 6),
+            estimated_cost_usd=round(cost, 6) if getattr(response, 'backend', 'api') == 'api' else None,
+            backend=getattr(response, 'backend', 'api'),
         )
 
     def estimate_tribunal_cost(self, input_tokens_per_call: int) -> CostEstimate:

@@ -71,20 +71,22 @@ def register(subparsers):
 
 
 def execute(args):
+    from .extended_cli import execution_estimate, execution_requested
     if args.command != 'compare-clinician':
         return None
     if args.file:
-        if args.approve_cost:
+        if execution_requested(args):
             raise ValueError('manual comparison does not use paid approval')
         return 0, compare_clinician(args.store, args.run_id, manual=json.loads(args.file.read_text(encoding='utf-8')))
     from .config import ModelRegistry
     registry = ModelRegistry.for_cli()
     estimate = registry._combine_cost_lines(registry._estimate_extra_stages(args.input_tokens,
         (('clinician_comparison', 'openai', registry.synthesis_output_tokens),)))
-    if not args.approve_cost:
+    estimate = execution_estimate(args, estimate)
+    if not execution_requested(args):
         from .cli import _cost_payload
         return 2, {**_cost_payload(estimate), **compare_clinician(args.store, args.run_id)}
     from .extended_cli import approved_estimate
     from .providers import build_live_gateways
-    return 0, compare_clinician(args.store, args.run_id, gateway=build_live_gateways(registry)['openai'],
+    return 0, compare_clinician(args.store, args.run_id, gateway=build_live_gateways(registry, backend=estimate.backend)['openai'],
                                registry=registry, estimate=approved_estimate(args, estimate))

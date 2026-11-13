@@ -69,7 +69,7 @@ class TribunalResult(StrictFrozenModel):
     synthesis_reviews: tuple[SynthesisReview, ...]
     calls: tuple[ProviderCallRecord, ...]
     pricing_as_of: date
-    approved_cost_upper_bound_usd: float
+    approved_cost_upper_bound_usd: float | None
     created_at: datetime
     search_queries: tuple[str, ...] = ()
     data_cutoff: datetime | None = None
@@ -105,6 +105,8 @@ class TribunalService:
     ) -> TribunalResult:
         if not estimate.approved:
             raise PermissionError("explicit cost approval is required before tribunal execution")
+        if any(gateway.backend != estimate.backend for gateway in self.gateways.values()):
+            raise ValueError('execution backend does not match the configured gateways')
         run_id = run_id or f"research-run-{uuid.uuid4().hex}"
         ledger = AppendOnlyJsonlLedger(self.root / "runs" / run_id / "ledger.jsonl")
         configuration = {
@@ -115,6 +117,10 @@ class TribunalService:
         if self.registry.openai_only:
             configuration["review_roles"] = self.reviewers
         existing = next((r["payload"] for r in ledger.records() if r["kind"] == "RESEARCH_RUN_CREATED"), None)
+        if existing and existing['estimate'].get('backend', 'api') != estimate.backend:
+            raise ValueError('run backend is pinned; create a new run')
+        if existing and estimate.backend == 'codex' and existing['estimate']['codex_calls'] != estimate.codex_calls:
+            raise ValueError('Codex attempt limit is pinned; create a new run')
         if existing and existing.get("configuration") != configuration:
             raise ValueError("run model/configuration differs; restore the pinned configuration or create a new run")
         manifest = {

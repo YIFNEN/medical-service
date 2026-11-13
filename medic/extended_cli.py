@@ -15,6 +15,8 @@ def run_id(value):
 
 
 def budget_arguments(parser):
+    parser.add_argument('--backend', choices=('api', 'codex'))
+    parser.add_argument('--codex-calls', type=int, help='maximum Codex execution attempts for this approval')
     parser.add_argument('--budget-usd', type=float)
     parser.add_argument('--approval-id', default='default')
     parser.add_argument('--image-tokens-bound', type=int)
@@ -22,11 +24,34 @@ def budget_arguments(parser):
                         help='separate approval to send the reviewed personal input to configured providers')
 
 
+def execution_estimate(args, estimate):
+    backend = args.backend or 'api'
+    if backend == 'codex':
+        if args.budget_usd is not None or args.approve_cost:
+            raise ValueError('use --codex-calls for Codex subscription execution')
+        return estimate.model_copy(update={
+            'backend': 'codex', 'estimated_usd': None,
+            'lines': tuple(line.model_copy(update={'estimated_usd': None}) for line in estimate.lines),
+        })
+    if args.codex_calls is not None:
+        raise ValueError('--codex-calls requires --backend codex')
+    if args.approve_cost and args.budget_usd is None and args.command != 'resume':
+        raise ValueError('paid calls require --budget-usd')
+    return estimate
+
+
+def execution_requested(args):
+    return args.approve_cost or args.codex_calls is not None
+
+
 def approved_estimate(args, estimate):
-    if args.budget_usd is None:
+    if estimate.backend == 'api' and args.budget_usd is None:
         raise ValueError('paid calls require --budget-usd and --approve-cost')
+    if estimate.backend == 'codex' and args.codex_calls is None:
+        raise ValueError('Codex execution requires --codex-calls')
     return CostEstimate.model_validate({**estimate.model_dump(), 'approved': True,
         'budget_usd': args.budget_usd, 'approval_id': args.approval_id,
+        'codex_calls': args.codex_calls,
         'transmission_approved': getattr(args, 'approve_transmission', False),
         'image_tokens_bound': args.image_tokens_bound})
 
@@ -233,9 +258,9 @@ def execute(args):
         pin = {'case_id': args.case, 'settings': settings.model_dump(mode='json'),
                'cards': [c.model_dump(mode='json') for c in cards], 'context': context,
                'issues': read_json(args.issues) if args.issues else None}
-        ledger.append_once('LITERATURE_STAGE_CREATED', args.action, pin)
         pending = []
         if args.action == 'fetch':
+            ledger.append_once('LITERATURE_STAGE_CREATED', args.action, pin)
             resolver = FullTextResolver(ledger=ledger, local_papers=read_json(args.local_papers) if args.local_papers else {})
             result, requested = [], 0
             for card in sorted(cards, key=lambda c: (-c.priority_score, c.evidence_id)):
@@ -247,13 +272,16 @@ def execute(args):
                 result.append(card)
         else:
             registry = ModelRegistry.for_cli()
-            estimate = registry.estimate_research_cost(20000, settings=settings)
-            if not args.approve_cost:
+            estimate = execution_estimate(args, registry.estimate_research_cost(20000, settings=settings))
+            if not execution_requested(args):
                 from .cli import _cost_payload
                 return 2, {**_cost_payload(estimate), 'processing_settings': settings.model_dump(mode='json'),
                            'scope': 'conservative workflow estimate; actual stage calls vary'}
             estimate = approved_estimate(args, estimate)
-            gateways = build_live_gateways(registry)
+            if estimate.backend != 'api':
+                pin['backend'] = estimate.backend
+            ledger.append_once('LITERATURE_STAGE_CREATED', args.action, pin)
+            gateways = build_live_gateways(registry, backend=estimate.backend)
             if args.action == 'screen':
                 screener = LiteratureScreener(gateways['openai'], ledger, registry, settings)
                 issues = tuple(DecisionIssue.model_validate_json(json.dumps(v)) for v in read_json(args.issues)) if args.issues else screener.issues(

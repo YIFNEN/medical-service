@@ -400,13 +400,20 @@ class ReportRenderer:
             for support in card.field_support:
                 lines.append(f"  - {_safe_text(support.field)} 근거 [{support.source_start}:{support.source_end}] "
                              f"{_safe_text(support.source_locator or 'text')} / {_safe_text(support.source_sha256 or '')}: {_safe_text(support.quote)}")
+        api_calls = [call for call in report.calls if call.backend == 'api']
+        codex_calls = [call for call in report.calls if call.backend == 'codex']
         lines.extend([
             "",
             "## 12. 모델·프롬프트·검색식·비용·run 계보",
             "",
-            f"- 가격 기준일: {_safe_text(report.pricing_as_of.isoformat())}",
-            f"- 승인 당시 비용 추정: USD {report.approved_cost_upper_bound_usd:.6f} (예산 상한 집행 아님)",
-            f"- 기록된 추출·검색계획·근거추출·Tribunal 사용량 기반 비용 추정 (재사용한 과거 추출 포함): USD {sum(call.estimated_cost_usd for call in report.calls):.6f}",
+            *([f"- API 가격 기준일: {_safe_text(report.pricing_as_of.isoformat())}",
+               f"- API 기록 사용량 기반 비용 추정: USD {sum(call.estimated_cost_usd or 0 for call in api_calls):.6f}"]
+              if api_calls else []),
+            *([f"- 승인 당시 비용 추정: USD {report.approved_cost_upper_bound_usd:.6f}"]
+              if report.approved_cost_upper_bound_usd is not None else []),
+            *([f"- Codex 구독 실행 {len(codex_calls)}건. 보고된 입력 {sum(c.input_tokens for c in codex_calls):,}토큰, "
+               f"출력 {sum(c.output_tokens for c in codex_calls):,}토큰. 남은 한도는 ChatGPT에서 확인합니다."]
+              if codex_calls else []),
             f"- 프롬프트 정책: {_safe_text(report.prompt_version)}",
             f"- 분석 완료시각: {_safe_text(report.completed_at)}",
             "- 검색식:",
@@ -416,7 +423,7 @@ class ReportRenderer:
         if report.calls:
             for call in report.calls:
                 lines.append(
-                    f"- {_safe_text(call.stage)}: {_safe_text(call.provider)}/{_safe_text(call.model)}, response {_safe_text(call.provider_response_id)}, "
+                    f"- {_safe_text(call.stage)}: {_safe_text(call.backend)}/{_safe_text(call.provider)}/{_safe_text(call.model)}, response {_safe_text(call.provider_response_id)}, "
                     f"tokens {call.input_tokens}+{call.output_tokens}"
                 )
         else:

@@ -43,6 +43,7 @@ class GatewayResult(Generic[T]):
     response_id: str
     input_tokens: int
     output_tokens: int
+    backend: str = 'api'
 
 
 class RawGateway(Protocol):
@@ -72,6 +73,10 @@ class ApprovedGateway:
     def model(self) -> str:
         return self.inner.model
 
+    @property
+    def backend(self) -> str:
+        return getattr(self.inner, 'backend', 'api')
+
     def generate(
         self,
         *,
@@ -83,11 +88,15 @@ class ApprovedGateway:
         image_paths: tuple[Path, ...] = (),
         _budget_reserved: bool = False,
     ) -> GatewayResult[T]:
+        if self.backend != estimate.backend:
+            raise PermissionError('execution backend must match the approved estimate')
         if not estimate.approved:
             raise PermissionError("explicit cost approval is required before provider calls")
         if isinstance(self.inner, _LiveGateway) and not _budget_reserved:
             raise PermissionError('live calls require the persistent budget reservation boundary')
-        if isinstance(self.inner, _LiveGateway) and estimate.data_scope == 'PERSONAL' and not estimate.transmission_approved:
+        if self.backend == 'codex' and (not _budget_reserved or not estimate.codex_calls or estimate.budget_usd is not None):
+            raise PermissionError('Codex execution requires a reserved attempt under its configured limit')
+        if (isinstance(self.inner, _LiveGateway) or self.backend == 'codex') and estimate.data_scope == 'PERSONAL' and not estimate.transmission_approved:
             raise PermissionError('separate personal-data transmission approval is required')
         response = self.inner.generate_raw(
             stage=stage,
@@ -104,6 +113,7 @@ class ApprovedGateway:
             response_id=response.response_id,
             input_tokens=response.input_tokens,
             output_tokens=response.output_tokens,
+            backend=self.backend,
         )
 
 
@@ -319,7 +329,16 @@ class GeminiGateway(_LiveGateway):
         )
 
 
-def build_live_gateways(registry) -> dict[str, ApprovedGateway]:
+def build_live_gateways(registry, *, backend='api') -> dict[str, ApprovedGateway]:
+    if backend == 'codex':
+        from .codex_gateway import CodexGateway
+        if not registry.openai_only:
+            raise ValueError('Codex execution requires the OpenAI-only workflow')
+        gateway = ApprovedGateway(CodexGateway())
+        gateway.registry = registry
+        return {'openai': gateway}
+    if backend != 'api':
+        raise ValueError('unknown execution backend')
     classes = {"openai": OpenAIGateway, "anthropic": AnthropicGateway, "google": GeminiGateway}
     gateways = {
         item.provider: ApprovedGateway(classes[item.provider](item.model, item.api_key_env, item.reasoning))

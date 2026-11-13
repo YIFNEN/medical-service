@@ -27,7 +27,8 @@ def compare_results(before, after):
         'opinions_changed': before.synthesis.model_dump(mode='json') != after.synthesis.model_dump(mode='json'),
         'clinical_change': 'NOT_INFERRED',
         'warning': 'Acquisition, review and evidence may differ; changed output does not prove clinical progression or improved accuracy.',
-        'estimated_usage_usd': {'before': sum(c.estimated_cost_usd for c in before.calls), 'after': sum(c.estimated_cost_usd for c in after.calls)},
+        'estimated_usage_usd': {'before': sum(c.estimated_cost_usd or 0 for c in before.calls),
+                                'after': sum(c.estimated_cost_usd or 0 for c in after.calls)},
         'elapsed_seconds_including_resume_delays': {'before': duration(before), 'after': duration(after)},
         'accuracy_assessment': 'Requires independently reviewed claim support, numerical accuracy and applicability labels.',
     }

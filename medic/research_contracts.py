@@ -329,7 +329,8 @@ class ProviderCallRecord(StrictFrozenModel):
     provider_response_id: str
     input_tokens: int = Field(ge=0)
     output_tokens: int = Field(ge=0)
-    estimated_cost_usd: float = Field(ge=0)
+    estimated_cost_usd: float | None = Field(ge=0)
+    backend: Literal['api', 'codex'] = Field(default='api', exclude_if=lambda value: value == 'api')
 
 
 class MedicalDecisionReport(StrictFrozenModel):
@@ -349,7 +350,7 @@ class MedicalDecisionReport(StrictFrozenModel):
     evidence_cards: tuple[EvidenceCard, ...]
     calls: tuple[ProviderCallRecord, ...]
     pricing_as_of: date
-    approved_cost_upper_bound_usd: float = Field(ge=0, allow_inf_nan=False)
+    approved_cost_upper_bound_usd: float | None = Field(ge=0, allow_inf_nan=False)
     search_queries: tuple[str, ...] = ()
     labels: tuple[str, ...] = (
         "PERSONAL_RESEARCH",
