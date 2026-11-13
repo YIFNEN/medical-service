@@ -145,7 +145,7 @@ class ConfirmedFactDetail(StrictFrozenModel):
     fact_id: str | None = None
     scope: FactScope = Field(default_factory=FactScope)
     conflict: bool = False
-    confirmation_scope: Literal["SOURCE_TRANSCRIPTION_ONLY", "UNREVIEWED_EXTRACTION", "LEGACY_UNSPECIFIED"] = "LEGACY_UNSPECIFIED"
+    confirmation_scope: Literal["SOURCE_TRANSCRIPTION_ONLY", "UNREVIEWED_EXTRACTION", "LEGACY_UNSPECIFIED", "IMAGE_OBSERVATION_REVIEWED"] = "LEGACY_UNSPECIFIED"
 
 
 class DomainAssessment(StrictFrozenModel):

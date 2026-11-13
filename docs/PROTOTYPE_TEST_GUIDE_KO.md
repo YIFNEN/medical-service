@@ -234,6 +234,67 @@ $ReviewPath = Read-Host 'Slicer가 출력한 review.json 절대 경로'
 
 ## 8. 비용·전송 승인 후 실제 제공자 시험
 
+### CT·X-ray 후보 소견과 판독 대조
+
+먼저 CT·X-ray의 환자, 부위, 좌우를 로컬에서 확인한다. `$CtSeries`와 `$XraySeries`에 확인한 시리즈 UID를 지정한다. `$Manifest`에는 `dicom inspect`가 출력한 manifest 경로를 지정한다.
+
+```powershell
+$Preview = & $Python -X utf8 -m medic dicom prepare-pilot --case $Case `
+  --manifest $Manifest --ct-series $CtSeries --xray-series $XraySeries --store $Store | ConvertFrom-Json
+Invoke-Item -LiteralPath $Preview.preview_path
+& $Python -X utf8 -m medic providers smoke --synthetic-image --backend codex `
+  --codex-calls 1 --run-id synthetic-image-001 --store $Store
+```
+
+`REVIEW_REQUIRED`의 HTML에는 최대 9개 CT 대표 단면과 2개 X-ray, 표시 정보와 묶음 해시가 있다. 해당 원본은 로컬에 보관한다. 대표 단면의 커버리지에는 한계가 있다. 촬영 방향과 보정 정보가 확인되지 않으면 미확인으로 취급한다. X-ray에 보정 정보가 없으면 물리 거리를 계산할 수 없다. 합성 연결 시험의 성공은 `PASSED`이며, 픽셀 입력과 응답 경로를 검증한다.
+
+미리보기의 그림을 클릭하여 원래 PNG 크기에서 식별정보를 검수한다. 픽셀에 정보가 있으면 `$Masks` 경로에 UTF-8 JSON으로 가릴 좌표를 적는다. 예시 `{"XRAY-1":[[0,0,120,40]]}`의 네 수는 왼쪽, 위, 오른쪽, 아래 좌표다. 실제 좌표는 이미지를 보고 지정한다.
+
+```powershell
+$Preview = & $Python -X utf8 -m medic dicom redact-pilot `
+  --input $Preview.path --masks $Masks --store $Store | ConvertFrom-Json
+Invoke-Item -LiteralPath $Preview.preview_path
+```
+
+최종 미리보기의 각 이미지와 표시 정보, 정확한 해시, 시도 상한을 확인한 다음 전송을 승인한다. 아래 예시에는 CT와 X-ray 각 1회가 포함된다. 실패한 시도도 상한에 포함한다. 같은 ID와 해시로 재개하면 성공한 요청을 재사용한다. 허용 시도를 모두 사용했으면 실패 원인을 확인하고 새 승인과 새 ID로 진행한다.
+
+```powershell
+$Seal = & $Python -X utf8 -m medic dicom analyze-pilot --input $Preview.path `
+  --input-sha256 $Preview.input_sha256 --reviewer local-user --run-id image-pilot-001 `
+  --codex-calls 2 --approve-transmission --store $Store | ConvertFrom-Json
+```
+
+두 응답이 검증되면 `SEALED`와 `result_sha256`을 반환한다. 봉인 파일에는 이미지 ID와 영역, 후보 관찰, 불확실성, 커버리지 한계가 있다. 판독문은 봉인 이후 로컬에서 대조한다. `$CompareReview`에 다음 예시의 해시·경로·UID와 원문 구절을 실제 값으로 교체해 저장한다. 후보와 판독 항목 번호는 각각 1부터 시작하며 모든 항목의 대응을 기록한다.
+
+```json
+{
+  "result_sha256": "sha256:REPLACE_WITH_SEAL_HASH",
+  "case_id": "SYNTHETIC-ANKLE",
+  "modality": "CT",
+  "study_uid": "1.2.3",
+  "reviewer": "local-user",
+  "same_exam_confirmed": true,
+  "report_path": "D:/local/synthetic-reference.pdf",
+  "report_sha256": "sha256:REPLACE_WITH_REPORT_HASH",
+  "references": [{"page": 1, "quote": "A contour is visible."}],
+  "rows": [{"candidate_index": 1, "reference_index": 1, "relationship": "AGREEMENT", "explanation": "Both describe the same location."}]
+}
+```
+
+```powershell
+& $Python -X utf8 -m medic dicom compare-pilot --sealed $Seal.path --review $CompareReview --store $Store
+```
+
+결과는 `COMPARED`와 대조 파일 경로다. 원본 PDF 바이트 해시와 페이지의 구절을 검증한다. 잠긴 PDF는 `--pdf-password-prompt`로 로컬 터미널에서 연다. 페이지에서 구절을 확인할 수 없는 스캔은 대조를 보류한다. `AI_MISSED`는 비교 가능한 영상 범위의 판독 항목만 입력한다. 선택한 영상 바깥의 항목은 `NOT_COMPARABLE`로 기록한다. `REPORT_SILENT`는 해당 항목에 판독문 언급이 없다는 뜻이다. 대조 결과에 임상 정확도 점수를 매기지 않는다.
+
+후보를 원본 영상과 직접 대조해 확인했다면 `$ObservationReview`에 `result_sha256`, `case_id`, `reviewer`, `source_pixels_reviewed: true`, `observations: [{"modality":"CT","candidate_index":1,"observation":"사용자가 확인한 시각 관찰"}]`을 적는다.
+
+```powershell
+& $Python -X utf8 -m medic dicom review-pilot --sealed $Seal.path --review $ObservationReview --store $Store
+```
+
+`USER_REVIEWED`의 fact ID를 사례 입력 검수에서 `observation`으로 분류하면 가림 모드에서 사용할 수 있다. 정량 지표에는 6절의 Slicer 계측 경로를 사용한다.
+
 ### Codex 구독으로 실행
 
 `codex login status`에서 ChatGPT 로그인을 확인한다. MEDIC의 `--backend codex`는 로그인된 로컬 Codex CLI에 각 요청을 전달하고 JSON 스키마로 결과를 검증한다. 현재 선택 모델은 `gpt-6.1-sol`이다. [Codex 인증](https://learn.chatgpt.com/docs/auth) · [Codex 비대화형 실행](https://learn.chatgpt.com/docs/non-interactive-mode)
@@ -347,6 +408,25 @@ AGREEMENT/CONFLICT/ASSUMPTION_DIFFERENCE/TIME_DIFFERENCE/INSUFFICIENT_EVIDENCE�
 결과는 `comparisons/results/`에 새로 저장하며 원래 보고서·봉인 결과를 바꾸지 않는다.
 
 ## 10. 장애·재개·후속 자료·증빙
+
+### 동일 검색 후보로 초록과 선택 전문 비교
+
+같은 검수 입력·질문·모델·검색 한도에서 첫 실행은 `--fulltext-limit 0`으로 시작한다. 검색식은 기존 절차로 검수한다. 다음 실행은 새 ID와 새 전송 승인으로 시작하고 `--fulltext-limit 1 --reuse-search-from`을 지정한다.
+
+```powershell
+& $Python -X utf8 -m medic deliberate $Case --preset pilot --backend codex `
+  --fulltext-limit 0 --run-id abstracts-001 --store $Store
+& $Python -X utf8 -m medic deliberate $Case --preset pilot --backend codex `
+  --fulltext-limit 1 --reuse-search-from abstracts-001 --run-id selective-001 --store $Store
+```
+
+위 명령은 각각 호출 수 확인용이다. 각 실행의 정확한 입력을 검수하고 승인된 `--codex-calls N --approve-transmission`을 추가해 실행한다. 두 번째 실행의 `literature search-plan`에 저장된 검색식을 확인해 재개한다. 두 실행이 완료되면 아래 명령으로 후보 묶음의 일치 여부, 실제 분석 범위, 토큰과 경과 시간을 확인한다.
+
+```powershell
+& $Python -X utf8 -m medic compare-runs abstracts-001 selective-001 --store $Store
+```
+
+`same_search_snapshot: true`가 같은 검색 후보를 뜻한다. 선별·전문 검토·판단은 각 실행에서 수행한다. 주장별 원문 뒷받침, 숫자·단위·분모, 개인 적용성은 별도로 검수한다. 보고서가 달라진 사실만으로 개선으로 기록하지 않는다.
 
 | 상황 | 다음 행동·합격 기준 |
 |---|---|

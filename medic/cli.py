@@ -104,6 +104,7 @@ def _parser() -> argparse.ArgumentParser:
     for paid in (review, deliberate, resume):
         budget_arguments(paid)
     deliberate.add_argument('--local-papers', type=Path)
+    deliberate.add_argument('--reuse-search-from', metavar='BASELINE_RUN')
     deliberate.add_argument('--approve-search', action='store_true')
     deliberate.add_argument('--mode', choices=('standard', 'clinician-blind'), default='standard')
     deliberate.add_argument('--blind-review', type=Path)
@@ -227,6 +228,14 @@ def _latest_context(ledger: AppendOnlyJsonlLedger, case_id: str) -> dict[str, An
                 uncertainties.append(f'Source review withdrawn or deferred: {key}')
             elif key in facts_by_key:
                 facts_by_key[key] = {**facts_by_key[key], 'value': decision['value']}
+            continue
+        if record['kind'] == 'IMAGE_OBSERVATIONS_REVIEWED' and record['payload'].get('case_id') == case_id:
+            found = True
+            for detail in record['payload']['facts']:
+                key = detail['fact_id']
+                if key not in key_order:
+                    key_order.append(key)
+                facts_by_key[key] = detail
             continue
         if record["kind"] != "HIGH_IMPACT_FACTS_CONFIRMED":
             continue
@@ -451,7 +460,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             run_id=args.run_id, case_id=args.case, patient_context=context,
             question_set=questions, estimate=estimate, settings=settings,
             local_papers=read_json(args.local_papers) if args.local_papers else {},
-            search_approved=args.approve_search,
+            search_approved=args.approve_search, reuse_search_from=args.reuse_search_from,
         )
         paths = _render_completed(root, result)
         output = {
@@ -505,6 +514,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 fulltext_limit=workflow_manifest.get('fulltext_limit', 5),
                 settings=ProcessingSettings.model_validate(workflow_manifest['processing_settings']) if workflow_manifest.get('processing_settings') else None,
                 local_papers=workflow_manifest.get('local_papers', {}), search_approved=args.approve_search,
+                reuse_search_from=workflow_manifest.get('reused_search', {}).get('run_id'),
             )
             paths = _render_completed(root, result)
             print(json.dumps({"run_id": args.run_id, "resumed": True,

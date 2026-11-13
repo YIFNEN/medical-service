@@ -8,7 +8,7 @@ from .budget import BudgetLedger, request_bound
 from .config import ModelRegistry
 
 
-def cached_generate(ledger, gateway, *, scope, **kwargs):
+def cached_generate(ledger, gateway, *, scope, validate_result=None, **kwargs):
     """Persist each successful paid boundary before starting the next call."""
     if ledger.path.parent.parent.name == 'runs':
         from .blinding import assert_no_leak
@@ -30,8 +30,10 @@ def cached_generate(ledger, gateway, *, scope, **kwargs):
                          if r["kind"] == "PROVIDER_CALL_COMPLETED" and r["natural_key"] == key), None)
         if existing:
             payload = existing["payload"]
-            return GatewayResult(value=schema.model_validate_json(json.dumps(payload["value"])),
-                                 **payload["metadata"])
+            value = schema.model_validate_json(json.dumps(payload["value"]))
+            if validate_result:
+                validate_result(value)
+            return GatewayResult(value=value, **payload["metadata"])
         if not estimate.approved:
             raise PermissionError('explicit cost approval is required before reservation')
         registry = getattr(gateway, 'registry', None) or ModelRegistry.default()
@@ -62,6 +64,8 @@ def cached_generate(ledger, gateway, *, scope, **kwargs):
             budget.reserve(attempt, bound)
         # No hidden retries: failures keep their reservation. Resume is explicit.
         result = gateway.generate(**kwargs, _budget_reserved=budget is not None or backend == 'codex')
+        if validate_result:
+            validate_result(result.value)
         ledger.append_once("PROVIDER_CALL_COMPLETED", key, {
             "stage": kwargs["stage"], "value": result.value.model_dump(mode="json"),
             "metadata": {"provider": result.provider, "model": result.model,

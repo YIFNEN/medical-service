@@ -1,6 +1,7 @@
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from medic.config import ModelRegistry
 from medic.providers import ApprovedGateway, RecordedGateway
@@ -59,3 +60,35 @@ class WorkflowResumeTests(unittest.TestCase):
             self.assertEqual(sum(call.stage == "LITERATURE_SEARCH_PLANNING" for call in result.calls), 3)
             self.assertEqual(workflow.run(**args), result)
             self.assertEqual(sum(g.call_count for g in raw.values()), 18)
+
+    def test_fulltext_comparison_reuses_pinned_search_results(self):
+        from medic.evidence import OfficialLiteratureRetriever
+        from medic.ledger import AppendOnlyJsonlLedger
+        from medic.workflow import ResearchWorkflow, ResearchRunFailed
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            _, gateways = fixtures.gateways()
+            workflow = ResearchWorkflow(root, gateways, OfficialLiteratureRetriever(()))
+            questions = QuestionSet.for_comprehensive_review('case-1')
+            args = dict(case_id='case-1', patient_context={'confirmed_facts': []}, question_set=questions,
+                        estimate=ModelRegistry.default().estimate_deliberation_cost(100).approve(),
+                        search_approved=True)
+            card = fixtures.TribunalTests().evidence()
+            from medic.evidence import EvidenceBundle
+            bundle = EvidenceBundle(cards=(card,), queries=('ankle fracture union',))
+            from types import SimpleNamespace
+            with patch('medic.workflow.LiteratureSearchPlanner.plan', return_value=SimpleNamespace(queries=bundle.queries)) as plan_calls, \
+                    patch.object(workflow.retriever, 'search', return_value=bundle) as searches, \
+                    patch('medic.workflow.LiteratureScreener.issues', side_effect=RuntimeError):
+                with self.assertRaises(ResearchRunFailed):
+                    workflow.run(**args, run_id='baseline', fulltext_limit=0)
+                with self.assertRaises(ResearchRunFailed):
+                    workflow.run(**args, run_id='followup', fulltext_limit=1, reuse_search_from='baseline')
+                self.assertEqual(searches.call_count, 1)
+                self.assertEqual(plan_calls.call_count, 1)
+                records = AppendOnlyJsonlLedger(root / 'runs' / 'followup' / 'ledger.jsonl').records()
+                self.assertTrue(any(r['kind'] == 'LITERATURE_SEARCH_SNAPSHOT' for r in records))
+                with self.assertRaisesRegex(ValueError, 'inputs differ'):
+                    workflow.run(**{**args, 'patient_context': {'confirmed_facts': ['changed']}},
+                                 run_id='changed', fulltext_limit=1, reuse_search_from='baseline')

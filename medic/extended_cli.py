@@ -98,6 +98,8 @@ def register(subparsers):
     dicom = subparsers.add_parser('dicom').add_subparsers(dest='action', required=True)
     from .imaging_cli import register as register_imaging
     register_imaging(dicom)
+    from .image_pilot import register as register_image_pilot
+    register_image_pilot(dicom)
     prepare = dicom.add_parser('prepare-slicer-test')
     store(prepare)
     source_test = dicom.add_parser('prepare-slicer-source-test')
@@ -153,6 +155,10 @@ def register(subparsers):
 
 
 def execute(args):
+    from .image_pilot import execute as execute_image_pilot
+    handled = execute_image_pilot(args)
+    if handled is not None:
+        return handled
     from .imaging_cli import execute as execute_imaging
     handled = execute_imaging(args)
     if handled is not None:
@@ -240,7 +246,12 @@ def execute(args):
     if args.command == 'compare-runs':
         from .comparison import compare_results
         from .tribunal import TribunalService
-        result = compare_results(TribunalService.load(root, run_id(args.before)), TribunalService.load(root, run_id(args.after)))
+        runs = (run_id(args.before), run_id(args.after))
+        snapshots = tuple(next((sha256_digest(canonical_json_bytes(r['payload']))
+                                for r in AppendOnlyJsonlLedger(root / 'runs' / identifier / 'ledger.jsonl').records()
+                                if r['kind'] == 'LITERATURE_SEARCH_SNAPSHOT'), None) for identifier in runs)
+        result = compare_results(*(TribunalService.load(root, identifier) for identifier in runs),
+                                 search_snapshots=snapshots)
         return 0, {'path': str(save_json(root, 'comparisons', result)), **result}
     if args.command == 'literature':
         from .literature import LiteratureScreener, FullTextResolver, DecisionIssue

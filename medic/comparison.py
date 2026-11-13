@@ -2,7 +2,7 @@
 from .ledger import canonical_json_bytes, sha256_digest
 
 
-def compare_results(before, after):
+def compare_results(before, after, *, search_snapshots=(None, None)):
     if before.case_id != after.case_id:
         raise ValueError('cannot compare different cases')
     def identity(item):
@@ -19,6 +19,11 @@ def compare_results(before, after):
     images_after = after.patient_context.get('imaging_reviews', [])
     def duration(result):
         return (result.created_at - result.data_cutoff).total_seconds() if result.created_at and result.data_cutoff else None
+    def usage(result):
+        return {'completed_calls': len(result.calls), 'input_tokens': sum(c.input_tokens for c in result.calls),
+                'output_tokens': sum(c.output_tokens for c in result.calls),
+                'estimated_usage_usd': (sum(c.estimated_cost_usd for c in result.calls)
+                                        if all(c.estimated_cost_usd is not None for c in result.calls) else None)}
     return {
         'version': 'run-comparison/1', 'case_id': before.case_id, 'before': before.run_id, 'after': after.run_id,
         'facts': changes(before.patient_context.get('fact_details', []), after.patient_context.get('fact_details', [])),
@@ -27,8 +32,11 @@ def compare_results(before, after):
         'opinions_changed': before.synthesis.model_dump(mode='json') != after.synthesis.model_dump(mode='json'),
         'clinical_change': 'NOT_INFERRED',
         'warning': 'Acquisition, review and evidence may differ; changed output does not prove clinical progression or improved accuracy.',
-        'estimated_usage_usd': {'before': sum(c.estimated_cost_usd or 0 for c in before.calls),
-                                'after': sum(c.estimated_cost_usd or 0 for c in after.calls)},
+        'estimated_usage_usd': {'before': usage(before)['estimated_usage_usd'],
+                                'after': usage(after)['estimated_usage_usd']},
+        'usage': {'before': usage(before), 'after': usage(after)},
+        'search_snapshot_sha256': {'before': search_snapshots[0], 'after': search_snapshots[1]},
+        'same_search_snapshot': (search_snapshots[0] == search_snapshots[1] if all(search_snapshots) else None),
         'elapsed_seconds_including_resume_delays': {'before': duration(before), 'after': duration(after)},
         'accuracy_assessment': 'Requires independently reviewed claim support, numerical accuracy and applicability labels.',
     }

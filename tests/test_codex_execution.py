@@ -36,6 +36,32 @@ def test_codex_smoke_cli_preview_run_and_reuse(tmp_path, monkeypatch, capsys):
     assert len(calls) == 1
 
 
+def test_codex_image_smoke_checks_attachment_and_rejects_wrong_color(tmp_path, monkeypatch, capsys):
+    from PIL import Image
+    from medic.codex_gateway import CodexGateway
+    from medic.providers import RawProviderResponse
+
+    calls = []
+
+    def generate(self, *, image_paths, **kwargs):
+        with Image.open(image_paths[0]) as image:
+            assert image.size == (256, 256)
+            color = {(255, 0, 0): 'red', (0, 128, 0): 'green', (0, 0, 255): 'blue'}[image.getpixel((128, 128))]
+            assert image.getpixel((0, 0)) == (255, 255, 255)
+        calls.append(color)
+        return RawProviderResponse({'square_color': color if len(calls) == 1 else 'white'}, 'test-turn')
+
+    monkeypatch.setattr(CodexGateway, 'generate_raw', generate)
+    args = ['providers', 'smoke', '--backend', 'codex', '--synthetic-image', '--codex-calls', '1',
+            '--store', str(tmp_path), '--run-id']
+    for _ in range(2):
+        assert main([*args, 'smoke-1']) == 0
+        assert json.loads(capsys.readouterr().out)['status'] == 'PASSED'
+    assert len(calls) == 1
+    with pytest.raises(ValueError, match='image color'):
+        main([*args, 'smoke-2'])
+
+
 @pytest.mark.parametrize('unexpected_tool', [False, True])
 def test_codex_cli_command_uses_chatgpt_auth_stdin_and_validates_events(monkeypatch, unexpected_tool):
     from medic.codex_gateway import CodexGateway

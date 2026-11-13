@@ -7,7 +7,7 @@ from pathlib import Path
 from .config import CostEstimate, ModelRegistry
 from .evidence import EvidenceBundle, LiteratureSearchPlanner
 from .evidence_appraisal import EvidenceAppraiser
-from .ledger import AppendOnlyJsonlLedger, deterministic_id
+from .ledger import AppendOnlyJsonlLedger, canonical_json_bytes, deterministic_id, sha256_digest
 from .tribunal import PROMPT_VERSION, TribunalService
 from .literature import LiteratureScreener, FullTextResolver, select_evidence
 
@@ -16,13 +16,44 @@ class ResearchRunFailed(RuntimeError):
     pass
 
 
+def _search_inputs(manifest):
+    keys = ('case_id', 'patient_context', 'question_set', 'registry', 'models', 'prompt_version',
+            'sources', 'processing_settings', 'local_papers')
+    inputs = {key: manifest[key] for key in keys}
+    inputs['patient_context'] = dict(inputs['patient_context'])
+    # The verified blind snapshot carries a run-specific hash and timestamp.
+    if 'analysis_input' in inputs['patient_context']:
+        inputs['patient_context']['analysis_input'] = {'mode': inputs['patient_context']['analysis_input']['mode']}
+    inputs['processing_settings'] = {key: value for key, value in inputs['processing_settings'].items()
+                                     if key != 'fulltext_limit'}
+    inputs['backend'] = manifest['estimate'].get('backend', 'api')
+    return inputs
+
+
+def _reusable_search(root, source_id, manifest):
+    from .extended_cli import run_id
+
+    if run_id(source_id) == manifest['run_id']:
+        raise ValueError('reuse search from a different baseline run')
+    records = AppendOnlyJsonlLedger(root / 'runs' / source_id / 'ledger.jsonl').records()
+    source = next((r['payload'] for r in records if r['kind'] == 'WORKFLOW_CREATED'), None)
+    snapshot = next((r['payload'] for r in records if r['kind'] == 'LITERATURE_SEARCH_SNAPSHOT'), None)
+    if not source or not snapshot:
+        raise ValueError('baseline must have a saved, approved literature search snapshot')
+    if (source['fulltext_limit'] != 0 or manifest['fulltext_limit'] <= 0
+            or canonical_json_bytes(_search_inputs(source)) != canonical_json_bytes(_search_inputs(manifest))):
+        raise ValueError('literature comparison inputs differ beyond full-text scope')
+    return snapshot
+
+
 class ResearchWorkflow:
     def __init__(self, root: Path, gateways, retriever, registry=None):
         self.root, self.gateways, self.retriever = Path(root), gateways, retriever
         self.registry = registry or ModelRegistry.default()
 
     def run(self, *, case_id, patient_context, question_set, estimate, run_id=None, evidence_limit=None,
-            fulltext_limit=None, local_papers=None, resolver=None, search_approved=False, settings=None):
+            fulltext_limit=None, local_papers=None, resolver=None, search_approved=False, settings=None,
+            reuse_search_from=None):
         if not estimate.approved:
             raise PermissionError("explicit cost approval is required before workflow execution")
         if any(gateway.backend != estimate.backend for gateway in self.gateways.values()):
@@ -70,23 +101,39 @@ class ResearchWorkflow:
         if saved is not None and 'processing_settings' not in saved:
             # Historical manifests stay byte-equivalent; they used fixed batching/chunking.
             manifest.pop('processing_settings')
+        reuse = None
+        if reuse_search_from:
+            reuse = _reusable_search(self.root, reuse_search_from, manifest)
+            manifest['reused_search'] = {'run_id': reuse_search_from,
+                                         'sha256': sha256_digest(canonical_json_bytes(reuse))}
         ledger.append_once("WORKFLOW_CREATED", run_id, manifest)
         approved = CostEstimate.model_validate_json(json.dumps(manifest["estimate"]))
         try:
             if any(r["kind"] == "TRIBUNAL_COMPLETED" for r in ledger.records()):
                 return TribunalService.load(self.root, run_id)
-            plans = LiteratureSearchPlanner(self.gateways, self.registry).plan(
-                question_set, patient_context, approved, ledger=ledger)
+            snapshot = next((r['payload'] for r in ledger.records() if r['kind'] == 'LITERATURE_SEARCH_SNAPSHOT'), None)
+            if snapshot is None:
+                snapshot = reuse
+            queries = (tuple(snapshot['bundle']['queries']) if snapshot is not None else
+                       LiteratureSearchPlanner(self.gateways, self.registry).plan(
+                           question_set, patient_context, approved, ledger=ledger).queries)
             if patient_context.get('analysis_input', {}).get('mode') == 'CLINICIAN_BLIND':
                 from .blinding import assert_no_leak
-                assert_no_leak(self.root, run_id, '\n'.join(plans.queries))
-            search_key = deterministic_id('search-review', {'queries': list(plans.queries)})
-            ledger.append_once('SEARCH_REVIEW_REQUIRED', search_key, {'queries': list(plans.queries)})
+                assert_no_leak(self.root, run_id, '\n'.join(queries))
+            search_key = deterministic_id('search-review', {'queries': list(queries)})
+            ledger.append_once('SEARCH_REVIEW_REQUIRED', search_key, {'queries': list(queries)})
             if not any(r['kind'] == 'SEARCH_APPROVED' and r['natural_key'] == search_key for r in ledger.records()):
                 if not search_approved:
                     raise PermissionError('review literature search-plan, then resume with --approve-search')
-                ledger.append_once('SEARCH_APPROVED', search_key, {'queries': list(plans.queries)})
-            evidence = self.retriever.search(plans.queries, ledger=ledger)
+                ledger.append_once('SEARCH_APPROVED', search_key, {'queries': list(queries)})
+            if snapshot is None:
+                evidence = self.retriever.search(queries, ledger=ledger)
+                snapshot = {'bundle': evidence.model_dump(mode='json'),
+                            'search_metadata': [r['payload'].get('search_metadata', {}) for r in ledger.records()
+                                                if r['kind'] == 'SOURCE_SEARCH_COMPLETED']}
+            else:
+                evidence = EvidenceBundle.model_validate_json(json.dumps(snapshot['bundle']))
+            ledger.append_once('LITERATURE_SEARCH_SNAPSHOT', run_id, snapshot)
             literature_gateway = self.gateways[self.registry.literature_provider]
             appraiser = EvidenceAppraiser(literature_gateway, ledger, self.registry, settings)
             screener = LiteratureScreener(literature_gateway, ledger, self.registry, settings)
@@ -139,8 +186,7 @@ class ResearchWorkflow:
                 'unresolved_evidence_ids': [c.evidence_id for c in appraised if c.fulltext_required and c.analysis_scope != 'FULL_TEXT'],
                 'issues': [i.model_dump(mode='json') for i in issues],
                 'search_completeness': 'bounded search; not an exhaustive systematic review',
-                'search_metadata': [r['payload'].get('search_metadata', {}) for r in ledger.records()
-                                    if r['kind'] == 'SOURCE_SEARCH_COMPLETED'],
+                'search_metadata': snapshot['search_metadata'],
                 'budget_usd': approved.budget_usd,
             }
             from .literature_integrity import study_counts
@@ -153,7 +199,7 @@ class ResearchWorkflow:
             return TribunalService(self.root, self.gateways, self.registry).run(
                 run_id=run_id, case_id=case_id, patient_context=analysis_context,
                 question_set=question_set, evidence_cards=usable, estimate=approved,
-                search_queries=plans.queries, data_cutoff=datetime.fromisoformat(manifest["data_cutoff"]),
+                search_queries=queries, data_cutoff=datetime.fromisoformat(manifest["data_cutoff"]),
             )
         except Exception as exc:
             raise ResearchRunFailed(f"run {run_id} paused at {type(exc).__name__}; use medic resume {run_id}") from exc
