@@ -11,6 +11,28 @@ class EvidenceAppraisal(StrictFrozenModel):
     missing_fields: tuple[str, ...]
 
 
+def _located_fields(card, appraisal):
+    fields = []
+    for field in appraisal.fields:
+        positions = []
+        position = card.source_text.find(field.quote)
+        while position >= 0:
+            positions.append(position)
+            position = card.source_text.find(field.quote, position + 1)
+        if field.source_locator is not None:
+            passages = [p for p in card.source_passages if p.locator == field.source_locator]
+            positions = [pos for pos in positions if any(p.start <= pos and pos + len(field.quote) <= p.end for p in passages)]
+        if field.source_start is not None:
+            positions = [pos for pos in positions if pos == field.source_start]
+        if field.source_end is not None:
+            positions = [pos for pos in positions if pos + len(field.quote) == field.source_end]
+        if len(positions) != 1:
+            raise ValueError('evidence quote location is absent or ambiguous in the retrieved source')
+        start = positions[0]
+        fields.append(field.model_copy(update={"source_start": start, "source_end": start + len(field.quote)}))
+    return fields
+
+
 class EvidenceAppraiser:
     def __init__(self, gateway, ledger, registry=None, settings=None):
         self.gateway, self.ledger, self.registry = gateway, ledger, registry
@@ -73,29 +95,16 @@ class EvidenceAppraiser:
                           'source_passages': [{'locator': p.locator, 'start': p.start, 'end': p.end} for p in card.source_passages],
                           "patient_context": patient_context}, ensure_ascii=False, sort_keys=True)
         )
+        fields = []
+
+        def validate_quotes(value):
+            fields.extend(_located_fields(card, value))
+
         response = cached_generate(self.ledger, self.gateway,
             scope={"version": "evidence-appraisal/2", "evidence_id": card.evidence_id,
                    "registry": self.registry.model_dump(mode="json") if self.registry else None},
             stage="EVIDENCE_APPRAISAL", prompt=prompt, output_model=EvidenceAppraisal,
-            estimate=estimate, max_output_tokens=8000)
-        fields = []
-        for field in response.value.fields:
-            positions = []
-            position = card.source_text.find(field.quote)
-            while position >= 0:
-                positions.append(position)
-                position = card.source_text.find(field.quote, position + 1)
-            if field.source_locator is not None:
-                passages = [p for p in card.source_passages if p.locator == field.source_locator]
-                positions = [pos for pos in positions if any(p.start <= pos and pos + len(field.quote) <= p.end for p in passages)]
-            if field.source_start is not None:
-                positions = [pos for pos in positions if pos == field.source_start]
-            if field.source_end is not None:
-                positions = [pos for pos in positions if pos + len(field.quote) == field.source_end]
-            if len(positions) != 1:
-                raise ValueError('evidence quote location is absent or ambiguous in the retrieved source')
-            start = positions[0]
-            fields.append(field.model_copy(update={"source_start": start, "source_end": start + len(field.quote)}))
+            estimate=estimate, max_output_tokens=8000, validate_result=validate_quotes)
         grouped = {name: [f.value for f in fields if f.field == name] for name in (
             "study_design", "population", "intervention", "comparator", "findings", "effect_estimates", "limitations")}
         return card.model_copy(update={

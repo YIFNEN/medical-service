@@ -1,6 +1,7 @@
 from pathlib import Path
 import tempfile
 import unittest
+import pytest
 
 from medic.config import ModelRegistry
 from medic.extraction import ClinicalExtractionService
@@ -13,6 +14,45 @@ def responses(provider, count):
     return [{"provider_response_id": f"{provider}-{index}", "facts": [],
              **({"uncertainties": []} if provider == "anthropic" else
                 {"provider": provider, "model": provider})} for index in range(count)]
+
+
+@pytest.mark.parametrize('stage', ['independent', 'reconciliation'])
+def test_document_recovery_does_not_cache_unbound_response(tmp_path, stage):
+    registry = ModelRegistry.for_cli()
+    source = tmp_path / 'synthetic.txt'
+    source.write_text('Synthetic ankle report', encoding='utf-8')
+    ledger = AppendOnlyJsonlLedger(tmp_path / 'ledger.jsonl')
+    intake = FileIntakeService(ContentAddressedStore(tmp_path), ledger).ingest_files('case-1', [source])
+    independent = responses('openai', 1)[0]
+    reconciled = {'provider_response_id': 'summary', 'facts': [], 'uncertainties': []}
+    if stage == 'independent':
+        invalid = {**independent, 'facts': [
+            {'fact_key': 'alignment', 'value': 'fixture', 'source_locator': 'unlisted',
+             'high_impact': True, 'confidence': 1.0}]}
+        queue = [independent, invalid, independent, reconciled]
+        completed = 1
+    else:
+        invalid = {**reconciled, 'facts': [
+            {'fact_key': 'alignment', 'proposed_value': 'fixture', 'source_locators': ['unlisted'],
+             'supporting_providers': ['openai'], 'conflict': False, 'requires_user_confirmation': True,
+             'verification_note': 'fixture'}]}
+        queue = [independent, independent, invalid, reconciled]
+        completed = 2
+    raw = RecordedGateway('openai', 'recorded', queue)
+    raw.backend = 'codex'
+    service = ClinicalExtractionService(tmp_path, {'openai': ApprovedGateway(raw)}, registry)
+    estimate = registry.estimate_extraction_cost(100).approve().model_copy(update={
+        'backend': 'codex', 'codex_calls': 4, 'transmission_approved': True})
+
+    with pytest.raises(ValueError, match='unknown source locator'):
+        service.extract(intake, estimate)
+    assert sum(r['kind'] == 'PROVIDER_CALL_COMPLETED' for r in ledger.records()) == completed
+    assert sum(r['kind'] == 'CODEX_ATTEMPT_RESERVED' for r in ledger.records()) == completed + 1
+    result = service.extract(intake, estimate)
+    assert len(result.calls) == 3
+    assert raw.call_count == 4
+    assert service.extract(intake, estimate) == result
+    assert raw.call_count == 4
 
 
 class ExtractionResumeTests(unittest.TestCase):

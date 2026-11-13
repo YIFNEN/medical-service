@@ -63,13 +63,15 @@ class DecisionLiteratureTests(unittest.TestCase):
         response = {'decisions': [{'evidence_id': item.evidence_id, 'verdict': 'UNCERTAIN', 'reason': 'Need methods',
                                   'issue_ids': ['i'], 'impact': 3, 'applicability': 2, 'methods_needed': True}]}
         with tempfile.TemporaryDirectory() as temp:
-            raw = RecordedGateway('anthropic', 'model', [response])
+            raw = RecordedGateway('anthropic', 'model', [{'decisions': []}, response])
             service = LiteratureScreener(ApprovedGateway(raw), AppendOnlyJsonlLedger(Path(temp) / 'ledger.jsonl'))
+            with self.assertRaisesRegex(ValueError, 'each candidate'):
+                service.screen((item,), (issue,), {}, ModelRegistry.default().estimate_tribunal_cost(100).approve())
             result = service.screen((item,), (issue,), {}, ModelRegistry.default().estimate_tribunal_cost(100).approve())
             self.assertEqual(result[0].screening_status, 'UNCERTAIN')
             self.assertTrue(result[0].fulltext_required)
             self.assertEqual(service.screen((item,), (issue,), {}, ModelRegistry.default().estimate_tribunal_cost(100).approve()), result)
-            self.assertEqual(raw.call_count, 1)
+            self.assertEqual(raw.call_count, 2)
 
     def test_general_question_does_not_fetch_fulltext(self):
         from medic.literature import FullTextResolver

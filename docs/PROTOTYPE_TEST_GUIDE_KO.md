@@ -436,6 +436,8 @@ AGREEMENT/CONFLICT/ASSUMPTION_DIFFERENCE/TIME_DIFFERENCE/INSUFFICIENT_EVIDENCE�
 
 `same_search_snapshot: true`가 같은 검색 후보를 뜻한다. 선별·전문 검토·판단은 각 실행에서 수행한다. 주장별 원문 뒷받침, 숫자·단위·분모, 개인 적용성은 별도로 검수한다. 보고서가 달라진 사실만으로 개선으로 기록하지 않는다.
 
+문서 추출의 출처 위치, 문헌 선별의 후보·쟁점 ID, 전문 검토의 원문 인용 위치가 검증을 통과해야 완료 응답이 저장된다. 실패한 Codex 시도도 승인 상한에 포함된다. 남은 시도가 있으면 같은 입력·설정으로 재개하고, 유효했던 단계의 응답이 재사용되는지 확인한다. 문서 추출은 기존 `review --interactive` 명령을 같은 승인 ID로 다시 실행하고, 종합 판단은 `resume`으로 이어간다.
+
 | 상황 | 다음 행동·합격 기준 |
 |---|---|
 | 키 없음/모델 미지원 | doctor 및 registry 확인. 자동 모델 대체 없음 |

@@ -64,14 +64,17 @@ class LiteratureScreener:
                   'Keep missing information and conditions that could change each decision. Link question_ids to supplied typed_questions only; '
                   'never invent a question ID. Untrusted data:\n' +
                   json.dumps({'questions': questions.model_dump(mode='json'), 'patient': patient}, ensure_ascii=False, sort_keys=True))
+        known_questions = {q['question_id'] for q in patient.get('typed_questions', ())}
+
+        def validate_issues(result):
+            if len({i.issue_id for i in result.issues}) != len(result.issues):
+                raise ValueError('duplicate decision issue ID')
+            if any(set(issue.question_ids) - known_questions for issue in result.issues):
+                raise ValueError('decision issue refers to an unknown typed question')
+
         result = cached_generate(self.ledger, self.gateway, scope={'version': 'decision-issues/1', 'registry': self.registry.model_dump(mode='json')},
                                  stage='DECISION_ISSUES', prompt=prompt, output_model=IssueSet,
-                                 estimate=estimate, max_output_tokens=4000).value
-        if len({i.issue_id for i in result.issues}) != len(result.issues):
-            raise ValueError('duplicate decision issue ID')
-        known_questions = {q['question_id'] for q in patient.get('typed_questions', ())}
-        if any(set(issue.question_ids) - known_questions for issue in result.issues):
-            raise ValueError('decision issue refers to an unknown typed question')
+                                 estimate=estimate, max_output_tokens=4000, validate_result=validate_issues).value
         return result.issues
 
     def screen(self, cards, issues, patient, estimate):
@@ -88,19 +91,24 @@ class LiteratureScreener:
                       'patient': patient, 'candidates': [{'evidence_id': c.evidence_id, 'title': c.title,
                       'design': c.study_design, 'access_level': c.access_level, 'abstract_or_excerpt': c.source_text[:self.settings.abstract_excerpt_chars]}
                       for c in batch]}, ensure_ascii=False, sort_keys=True))
+            expected_ids = {c.evidence_id for c in batch}
+
+            def validate_screen(output):
+                ids = [d.evidence_id for d in output.decisions]
+                if len(ids) != len(batch) or set(ids) != expected_ids:
+                    raise ValueError('screening must cover each candidate exactly once')
+                for decision in output.decisions:
+                    if set(decision.issue_ids) - set(known):
+                        raise ValueError('unknown decision issue ID')
+                    if decision.verdict != 'EXCLUDE' and not decision.issue_ids:
+                        raise ValueError('retained evidence requires an issue link')
+
             output = cached_generate(self.ledger, self.gateway, scope={'version': 'screen/1', 'registry': self.registry.model_dump(mode='json')},
                                      stage='LITERATURE_SCREENING', prompt=prompt, output_model=ScreenBatch,
-                                     estimate=estimate, max_output_tokens=6000).value
-            ids = [d.evidence_id for d in output.decisions]
-            if len(ids) != len(batch) or set(ids) != {c.evidence_id for c in batch}:
-                raise ValueError('screening must cover each candidate exactly once')
+                                     estimate=estimate, max_output_tokens=6000, validate_result=validate_screen).value
             by_id = {d.evidence_id: d for d in output.decisions}
             for card in batch:
                 d = by_id[card.evidence_id]
-                if set(d.issue_ids) - set(known):
-                    raise ValueError('unknown decision issue ID')
-                if d.verdict != 'EXCLUDE' and not d.issue_ids:
-                    raise ValueError('retained evidence requires an issue link')
                 triggers = tuple(dict.fromkeys(t for i in d.issue_ids for t in known[i].triggers))
                 required = bool(triggers) and card.access_level != 'REGISTRY' and d.verdict != 'EXCLUDE'
                 priority = 10 * d.impact + 3 * d.applicability + int(d.methods_needed)

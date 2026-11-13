@@ -159,6 +159,26 @@ class ClinicalExtractionService:
                     json.dumps(cached, ensure_ascii=False)
                 )
         files_by_artifact = {item.artifact.artifact_id: item for item in intake.files}
+        allowed = {source_locator_key(block) for block in intake.blocks}
+        reference_locators = {
+            source_locator_key(block)
+            for block in intake.blocks
+            if files_by_artifact[block.artifact_id].image_role is ImageRole.REFERENCE_IMAGE_SCREENSHOT
+        }
+
+        def validate_extraction(batch):
+            if any(fact.source_locator not in allowed for fact in batch.facts):
+                raise ValueError("unknown source locator in independent extraction")
+
+        def validate_reconciliation(reconciliation):
+            for fact in reconciliation.facts:
+                if set(fact.source_locators) - allowed:
+                    raise ValueError("unknown source locator in reconciliation")
+                if not fact.source_locators:
+                    raise ValueError("reconciled fact requires a source locator")
+                if fact.fact_key is FactKey.NUMERIC_MEASUREMENT and reference_locators.intersection(fact.source_locators):
+                    raise ValueError("REFERENCE_IMAGE_SCREENSHOT cannot support numeric measurement")
+
         source_payload = [
             {
                 "artifact_id": block.artifact_id,
@@ -209,6 +229,7 @@ class ClinicalExtractionService:
                 estimate=estimate,
                 max_output_tokens=self.registry.analyst_output_tokens,
                 image_paths=image_paths,
+                validate_result=validate_extraction,
             )
             normalized_batch = ClinicalFactBatch(
                 provider=response.provider,
@@ -219,9 +240,6 @@ class ClinicalExtractionService:
                     for fact in response.value.facts
                 ),
             )
-            allowed = {source_locator_key(block) for block in intake.blocks}
-            if any(fact.source_locator not in allowed for fact in normalized_batch.facts):
-                raise ValueError("unknown source locator in independent extraction")
             batches.append(normalized_batch)
             calls.append(self.registry.call_record("DOCUMENT_FACT_EXTRACTION", response))
         reconcile_prompt = (
@@ -246,37 +264,19 @@ class ClinicalExtractionService:
             estimate=estimate,
             max_output_tokens=self.registry.revision_output_tokens,
             image_paths=image_paths,
+            validate_result=validate_reconciliation,
         )
         reconciliation = FactReconciliation(
             provider_response_id=response.response_id,
             facts=response.value.facts,
             uncertainties=response.value.uncertainties,
         )
-        allowed = {source_locator_key(block) for block in intake.blocks}
-        reference_locators = {
-            source_locator_key(block)
-            for block in intake.blocks
-            if files_by_artifact[block.artifact_id].image_role
-            is ImageRole.REFERENCE_IMAGE_SCREENSHOT
-        }
         seen_ids: set[str] = set()
         normalized_facts: list[ReconciledFact] = []
         for fact in reconciliation.facts:
-            unknown = set(fact.source_locators) - allowed
-            if unknown:
-                raise ValueError(f"unknown source locator in reconciliation: {sorted(unknown)}")
-            if not fact.source_locators:
-                raise ValueError("reconciled fact requires a source locator")
             if fact.fact_id in seen_ids:
                 continue
             seen_ids.add(fact.fact_id)
-            if (
-                fact.fact_key is FactKey.NUMERIC_MEASUREMENT
-                and set(fact.source_locators) & reference_locators
-            ):
-                raise ValueError(
-                    "REFERENCE_IMAGE_SCREENSHOT cannot support numeric measurement"
-                )
             required = fact.fact_key in HIGH_IMPACT_FACT_KEYS or fact.conflict
             normalized_facts.append(
                 fact.model_copy(update={"requires_user_confirmation": required})

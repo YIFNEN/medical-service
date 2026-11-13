@@ -34,6 +34,11 @@ class EvidenceAppraisalTests(unittest.TestCase):
             self.assertEqual(appraiser.appraise(card, {"confirmed_facts": []}, estimate), result)
             self.assertEqual(raw.call_count, 1)
             bad = {**payload, "fields": [{"field": "effect_estimates", "value": "90%", "quote": "Ninety percent"}]}
-            other = EvidenceAppraiser(ApprovedGateway(RecordedGateway("anthropic", "different", [bad])), appraiser.ledger)
+            retry = RecordedGateway("anthropic", "different", [bad, payload])
+            other = EvidenceAppraiser(ApprovedGateway(retry), appraiser.ledger)
             with self.assertRaisesRegex(ValueError, "quote"):
                 other.appraise(card, {}, estimate)
+            recovered = other.appraise(card, {}, estimate)
+            self.assertEqual(recovered.population, "20 adults")
+            self.assertEqual(other.appraise(card, {}, estimate), recovered)
+            self.assertEqual(retry.call_count, 2)
