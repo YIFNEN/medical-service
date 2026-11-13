@@ -386,7 +386,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         case_id = args.case_id or args.case
         if not case_id or not args.interactive:
             raise ValueError("real-file review requires CASE --interactive")
-        registry = ModelRegistry.default()
+        registry = ModelRegistry.for_cli()
         if args.approve_cost and args.budget_usd is None:
             raise ValueError('paid calls require --budget-usd')
         try:
@@ -415,7 +415,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         run = ReasoningService(ledger).analyze(args.case_id, args.claim, SyntheticReasoner())
         output = run.model_dump(mode="json")
     elif command == "deliberate":
-        registry = ModelRegistry.default()
+        registry = ModelRegistry.for_cli()
         if args.approve_cost and args.budget_usd is None:
             raise ValueError('paid calls require --budget-usd')
         settings = settings_from_args(args)
@@ -426,7 +426,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if not args.approve_cost:
             print(json.dumps({**_cost_payload(estimate), 'processing_settings': settings.model_dump(mode='json'),
                               'question_count': estimate.question_count,
-                              'estimate_scope': 'bounded batches/chunks and three-provider review; questions share prompts; not a billing guarantee'}, ensure_ascii=False, sort_keys=True))
+                              'estimate_scope': 'bounded batches/chunks and three-role review; questions share prompts; not a billing guarantee'}, ensure_ascii=False, sort_keys=True))
             return 2
         context = _latest_context(ledger, args.case)
         gateways = build_live_gateways(registry)
@@ -468,6 +468,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             if workflow_manifest.get('prompt_version') != PROMPT_VERSION:
                 raise ValueError('run policy changed; preserve old run and create a new run')
             registry = ModelRegistry.model_validate_json(json.dumps(workflow_manifest["registry"]))
+            if not registry.openai_only:
+                raise ValueError('this run uses the previous provider configuration; create a new OpenAI run')
             estimate = CostEstimate.model_validate_json(json.dumps(workflow_manifest["estimate"]))
             if not args.approve_cost:
                 print(json.dumps(_cost_payload(estimate.model_copy(update={"approved": False})), ensure_ascii=False))
@@ -498,6 +500,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         if "configuration" not in manifest:
             raise ValueError("legacy run has no pinned configuration; create a new run")
         registry = ModelRegistry.model_validate_json(json.dumps(manifest["configuration"]["registry"]))
+        if not registry.openai_only:
+            raise ValueError('this run uses the previous provider configuration; create a new OpenAI run')
         estimate = registry.estimate_tribunal_cost(args.input_tokens)
         if not args.approve_cost:
             print(json.dumps(_cost_payload(estimate), ensure_ascii=False, sort_keys=True))

@@ -16,6 +16,7 @@ from .claim_grounding import ground_synthesis, known_patient_fact_ids, synthesis
 from .evidence import CitationGate
 from .ledger import AppendOnlyJsonlLedger, canonical_json_bytes, sha256_digest
 from .providers import ApprovedGateway
+from .review_roles import REVIEW_ROLES
 from .research_contracts import (
     EvidenceCard,
     IndependentOpinion,
@@ -33,7 +34,7 @@ from .research_contracts import (
 
 T = TypeVar("T", bound=BaseModel)
 PROVIDERS = ("openai", "anthropic", "google")
-PROMPT_VERSION = "medic-agent-first/4.3"
+PROMPT_VERSION = "medic-agent-first/4.4"
 
 
 def blind_opinion_id(reviewer: str, opinion_id: str) -> str:
@@ -41,8 +42,8 @@ def blind_opinion_id(reviewer: str, opinion_id: str) -> str:
 
 
 def blinded_opinion(reviewer: str, opinion: IndependentOpinion) -> dict[str, Any]:
-    payload = opinion.model_dump(mode="json", exclude={"provider", "model", "provider_response_id", "opinion_id"})
-    identifiers = (opinion.provider_response_id, opinion.opinion_id, opinion.model, opinion.provider)
+    payload = opinion.model_dump(mode="json", exclude={"provider", "model", "provider_response_id", "opinion_id", "role_id"})
+    identifiers = (opinion.provider_response_id, opinion.opinion_id, opinion.model, opinion.provider, opinion.role_id)
     pattern = re.compile("|".join(re.escape(value) for value in identifiers if value), re.IGNORECASE)
     def scrub(value):
         if isinstance(value, str):
@@ -82,11 +83,13 @@ class TribunalService:
         self, root: Path, gateways: dict[str, ApprovedGateway],
         registry: ModelRegistry | None = None,
     ) -> None:
-        if set(gateways) != set(PROVIDERS):
-            raise ValueError("tribunal requires openai, anthropic and google gateways")
         self.root = Path(root)
         self.gateways = gateways
         self.registry = registry or ModelRegistry.default()
+        if set(gateways) != set(self.registry.review_providers):
+            raise ValueError("tribunal gateways must match the configured providers")
+        roles = tuple(REVIEW_ROLES) if self.registry.openai_only else PROVIDERS
+        self.reviewers = dict(zip(roles, self.registry.review_providers, strict=True))
 
     def run(
         self,
@@ -106,9 +109,11 @@ class TribunalService:
         ledger = AppendOnlyJsonlLedger(self.root / "runs" / run_id / "ledger.jsonl")
         configuration = {
             "registry": self.registry.model_dump(mode="json"),
-            "models": {provider: self.gateways[provider].model for provider in PROVIDERS},
+            "models": {provider: self.gateways[provider].model for provider in self.gateways},
             "prompt_version": PROMPT_VERSION,
         }
+        if self.registry.openai_only:
+            configuration["review_roles"] = self.reviewers
         existing = next((r["payload"] for r in ledger.records() if r["kind"] == "RESEARCH_RUN_CREATED"), None)
         if existing and existing.get("configuration") != configuration:
             raise ValueError("run model/configuration differs; restore the pinned configuration or create a new run")
@@ -141,9 +146,9 @@ class TribunalService:
                 calls.append(self.registry.call_record(payload["stage"], SimpleNamespace(**payload["metadata"])))
 
         opinions: dict[str, IndependentOpinion] = {}
-        for provider in PROVIDERS:
+        for role, provider in self.reviewers.items():
             value, call = self._stage(
-                ledger, "ANALYST_COMPLETED", provider, self.gateways[provider],
+                ledger, "ANALYST_COMPLETED", role, self.gateways[provider],
                 IndependentOpinion,
                 common_prompt + "\nProduce your sealed independent opinion. Do not infer other agents' views.",
                 self.registry.analyst_output_tokens, estimate, gate,
@@ -151,55 +156,60 @@ class TribunalService:
             if value.provider != provider:
                 raise ValueError("independent opinion provider does not match gateway")
             self._validate_domains(value, question_set, patient_context)
-            opinions[provider] = value
+            opinions[role] = value
             if call:
                 calls.append(call)
 
+        if len({opinion.opinion_id for opinion in opinions.values()}) != len(self.reviewers):
+            raise ValueError("independent opinions must have distinct identities")
+
         batches: dict[str, PeerReviewBatch] = {}
-        for provider in PROVIDERS:
-            targets = tuple(opinions[item] for item in PROVIDERS if item != provider)
-            aliases = {blind_opinion_id(provider, opinion.opinion_id): opinion.opinion_id for opinion in targets}
+        for role, provider in self.reviewers.items():
+            targets = tuple(opinions[item] for item in self.reviewers if item != role)
+            aliases = {blind_opinion_id(role, opinion.opinion_id): opinion.opinion_id for opinion in targets}
             prompt = self._json_prompt(
                 "Evaluate both anonymized foreign opinions. Return one review for each and do not review your own opinion.",
                 {"patient": patient_context, "questions": question_set, "evidence": evidence_cards,
-                 "targets": tuple(blinded_opinion(provider, opinion) for opinion in targets)},
+                 "targets": tuple(blinded_opinion(role, opinion) for opinion in targets)},
             )
             batch, call = self._stage(
-                ledger, "PEER_REVIEW_COMPLETED", provider, self.gateways[provider],
+                ledger, "PEER_REVIEW_COMPLETED", role, self.gateways[provider],
                 PeerReviewBatch, prompt, self.registry.peer_review_output_tokens,
                 estimate, gate,
             )
             expected = set(aliases)
             actual = {review.target_opinion_id for review in batch.reviews}
-            if actual != expected or batch.reviewer_provider != provider or any(
-                review.reviewer_provider != provider for review in batch.reviews
+            if actual != expected or batch.reviewer_provider != provider or (
+                not self.registry.openai_only and any(review.reviewer_provider != provider for review in batch.reviews)
             ):
                 raise ValueError("peer review batch must review exactly the two foreign opinions")
-            batches[provider] = batch.model_copy(update={"reviews": tuple(review.model_copy(update={
+            batches[role] = batch.model_copy(update={"reviews": tuple(review.model_copy(update={
                 "target_opinion_id": aliases[review.target_opinion_id],
+                "reviewer_provider": provider,
                 "reviewer_model": call.model,
+                "role_id": batch.role_id,
             }) for review in batch.reviews)})
             if call:
                 calls.append(call)
-        peer_reviews = tuple(review for provider in PROVIDERS for review in batches[provider].reviews)
+        peer_reviews = tuple(review for role in self.reviewers for review in batches[role].reviews)
 
         revisions: dict[str, RevisedOpinion] = {}
-        for provider in PROVIDERS:
-            own = opinions[provider]
+        for role, provider in self.reviewers.items():
+            own = opinions[role]
             received = tuple(review for review in peer_reviews if review.target_opinion_id == own.opinion_id)
             prompt = self._json_prompt(
                 "Respond to both reviews and explicitly maintain, modify, or withdraw your opinion.",
                 {"opinion": own, "received_reviews": received, "evidence": evidence_cards},
             )
             revised, call = self._stage(
-                ledger, "REVISION_COMPLETED", provider, self.gateways[provider],
+                ledger, "REVISION_COMPLETED", role, self.gateways[provider],
                 RevisedOpinion, prompt, self.registry.revision_output_tokens,
                 estimate, gate,
             )
             if revised.original_opinion_id != own.opinion_id or revised.provider != provider:
                 raise ValueError("revision lineage does not match the original opinion")
             self._validate_domains(revised, question_set, patient_context)
-            revisions[provider] = revised
+            revisions[role] = revised
             if call:
                 calls.append(call)
 
@@ -229,7 +239,7 @@ class TribunalService:
             calls.append(call)
 
         synthesis_reviews: list[SynthesisReview] = []
-        for provider in PROVIDERS:
+        for role, provider in self.reviewers.items():
             prompt = self._json_prompt(
                 "Review the proposed synthesis without erasing disagreement. Return exactly one claim_review for every supplied claim ID. "
                 "Check numbers, direction of effects, population, personal applicability, and invented papers/URLs. "
@@ -243,10 +253,10 @@ class TribunalService:
                 "Necessary verified passages in PARTIAL_FULL_TEXT can suffice; FULL_TEXT alone is not proof of a claim. "
                 "Localize every error to claim_reviews so the affected claim can be withheld independently.",
                 {"synthesis": synthesis, "claims": synthesis_claims(synthesis), "patient": patient_context,
-                 "own_revised_opinion": revisions[provider], "evidence": evidence_cards},
+                 "own_revised_opinion": revisions[role], "evidence": evidence_cards},
             )
             review, call = self._stage(
-                ledger, "SYNTHESIS_REVIEW_COMPLETED", provider, self.gateways[provider],
+                ledger, "SYNTHESIS_REVIEW_COMPLETED", role, self.gateways[provider],
                 SynthesisReview, prompt, self.registry.synthesis_review_output_tokens,
                 estimate, gate,
             )
@@ -268,9 +278,9 @@ class TribunalService:
             question_set=question_set,
             patient_context=patient_context,
             evidence_cards=evidence_cards,
-            opinions=tuple(opinions[item] for item in PROVIDERS),
+            opinions=tuple(opinions[item] for item in self.reviewers),
             peer_reviews=peer_reviews,
-            revised_opinions=tuple(revisions[item] for item in PROVIDERS),
+            revised_opinions=tuple(revisions[item] for item in self.reviewers),
             synthesis=synthesis,
             original_synthesis=original_synthesis,
             withheld_claims=withheld,
@@ -302,11 +312,11 @@ class TribunalService:
         )
 
     def _stage(
-        self, ledger: AppendOnlyJsonlLedger, kind: str, provider: str,
+        self, ledger: AppendOnlyJsonlLedger, kind: str, participant: str,
         gateway: ApprovedGateway, output_model: type[T], prompt: str,
         max_output_tokens: int, estimate: CostEstimate, gate: CitationGate,
     ) -> tuple[T, ProviderCallRecord | None]:
-        key = f"{kind}:{provider}"
+        key = f"{kind}:{participant}"
         existing = next(
             (record for record in ledger.records() if record["kind"] == kind and record["natural_key"] == key),
             None,
@@ -319,6 +329,9 @@ class TribunalService:
                 json.dumps(existing["payload"]["call"], ensure_ascii=False)
             )
             return value, call
+        role_id = participant if participant in REVIEW_ROLES else None
+        if role_id is not None:
+            prompt = f"Review role {role_id}: {REVIEW_ROLES[role_id][1]}\n{prompt}"
         from .blinding import assert_no_leak
         assert_no_leak(self.root, ledger.path.parent.name, prompt)
         response = cached_generate(ledger, gateway, scope={"prompt_version": PROMPT_VERSION,
@@ -331,7 +344,10 @@ class TribunalService:
         )
         metadata = {"provider": response.provider, "model": response.model,
                     "provider_response_id": response.response_id,
-                    "reviewer_provider": response.provider, "reviewer_model": response.model}
+                    "reviewer_provider": response.provider, "reviewer_model": response.model,
+                    "role_id": role_id}
+        if kind == "ANALYST_COMPLETED" and role_id is not None:
+            metadata["opinion_id"] = f"op-{role_id}"
         value = response.value.model_copy(update={key: value for key, value in metadata.items()
                                                  if key in type(response.value).model_fields})
         assert_no_leak(self.root, ledger.path.parent.name, value.model_dump_json())

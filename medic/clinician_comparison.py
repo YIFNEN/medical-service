@@ -78,7 +78,7 @@ def execute(args):
             raise ValueError('manual comparison does not use paid approval')
         return 0, compare_clinician(args.store, args.run_id, manual=json.loads(args.file.read_text(encoding='utf-8')))
     from .config import ModelRegistry
-    registry = ModelRegistry.default()
+    registry = ModelRegistry.for_cli()
     estimate = registry._combine_cost_lines(registry._estimate_extra_stages(args.input_tokens,
         (('clinician_comparison', 'openai', registry.synthesis_output_tokens),)))
     if not args.approve_cost:

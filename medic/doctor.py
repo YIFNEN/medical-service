@@ -11,7 +11,7 @@ from .config import ModelRegistry
 
 def inspect_environment(store, *, slicer=None):
     packages = {}
-    for package in ('pydantic', 'openai', 'anthropic', 'google-genai', 'pydicom', 'pynrrd', 'PyMuPDF'):
+    for package in ('pydantic', 'openai', 'pydicom', 'pynrrd', 'PyMuPDF'):
         try:
             packages[package] = importlib.metadata.version(package)
         except importlib.metadata.PackageNotFoundError:
@@ -22,7 +22,7 @@ def inspect_environment(store, *, slicer=None):
         ancestor = ancestor.parent
     configured = slicer or os.environ.get('MEDIC_SLICER_EXECUTABLE') or shutil.which('Slicer')
     slicer_path = Path(configured).resolve() if configured else None
-    registry = ModelRegistry.default()
+    registry = ModelRegistry.for_cli()
     result = {
         'schema_version': 'medic-doctor/1', 'network_calls_made': 0, 'paid_calls_made': 0,
         'python': {'version': platform.python_version(), 'supported': sys.version_info >= (3, 12)},

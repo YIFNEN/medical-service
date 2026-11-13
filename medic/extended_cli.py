@@ -246,7 +246,7 @@ def execute(args):
                     card = card.model_copy(update={'fulltext_status': 'PENDING_LIMIT'})
                 result.append(card)
         else:
-            registry = ModelRegistry.default()
+            registry = ModelRegistry.for_cli()
             estimate = registry.estimate_research_cost(20000, settings=settings)
             if not args.approve_cost:
                 from .cli import _cost_payload
@@ -255,7 +255,7 @@ def execute(args):
             estimate = approved_estimate(args, estimate)
             gateways = build_live_gateways(registry)
             if args.action == 'screen':
-                screener = LiteratureScreener(gateways['anthropic'], ledger, registry, settings)
+                screener = LiteratureScreener(gateways['openai'], ledger, registry, settings)
                 issues = tuple(DecisionIssue.model_validate_json(json.dumps(v)) for v in read_json(args.issues)) if args.issues else screener.issues(
                     QuestionSet.for_comprehensive_review(args.case, args.question), context, estimate)
                 result = screener.screen(cards[:settings.screening_limit], issues, context, estimate)
@@ -263,7 +263,7 @@ def execute(args):
                 result += cards[settings.screening_limit:]
                 save_json(root, 'literature/issues', [i.model_dump(mode='json') for i in issues])
             else:
-                appraiser = EvidenceAppraiser(gateways['anthropic'], ledger, registry, settings)
+                appraiser = EvidenceAppraiser(gateways['openai'], ledger, registry, settings)
                 result, fulltexts, count = [], 0, 0
                 for card in cards:
                     if card.screening_status == 'EXCLUDE':

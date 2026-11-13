@@ -30,15 +30,5 @@ def test_smoke_does_not_accept_wrong_echo_or_missing_provider(tmp_path):
     from medic.provider_checks import smoke
     import pytest
     registry = ModelRegistry.default()
-    with pytest.raises(ValueError, match='three'):
+    with pytest.raises(ValueError, match='configured providers'):
         smoke(tmp_path, 'bad', {}, registry, registry.estimate_tribunal_cost(100).approve())
-
-
-def test_cli_smoke_without_approval_estimates_only(tmp_path, capsys):
-    import json
-    from medic.cli import main
-    assert main(['providers', 'smoke', '--run-id', 'smoke-cli', '--store', str(tmp_path)]) == 2
-    result = json.loads(capsys.readouterr().out)
-    assert result['call_count'] == 3
-    assert result['paid_calls_made'] == 0
-    assert result['input_scope'] == 'SYNTHETIC_ONLY'

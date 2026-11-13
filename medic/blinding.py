@@ -202,18 +202,26 @@ def seal_result(root, result):
     if (result.case_id != snapshot['case_id'] or any(result.patient_context.get(k) != v for k,v in visible.items())
             or result.question_set.model_dump(mode='json') != snapshot['questions']):
         raise ValueError('result input differs from pinned blind snapshot')
-    if ({o.provider for o in result.opinions} != {'openai', 'anthropic', 'google'}
-            or {r.reviewer_provider for r in result.synthesis_reviews} != {'openai', 'anthropic', 'google'}
-            or len(result.synthesis_reviews) != 3):
-        raise ValueError('incomplete provider review cannot be sealed')
-    payload = result.model_dump(mode='json')
+    from .tribunal import TribunalResult
+    from .review_roles import REVIEW_ROLES
+    if any(o.role_id is not None for o in result.opinions):
+        opinions = {(o.provider, o.role_id) for o in result.opinions}
+        reviews = {(r.reviewer_provider, r.role_id) for r in result.synthesis_reviews}
+        expected = {('openai', role) for role in REVIEW_ROLES}
+    else:
+        opinions = {(o.provider, o.role_id) for o in result.opinions}
+        reviews = {(r.reviewer_provider, r.role_id) for r in result.synthesis_reviews}
+        expected = {(provider, None) for provider in ('openai', 'anthropic', 'google')}
+    if (opinions != expected or reviews != expected
+            or len(result.opinions) != 3 or len(result.synthesis_reviews) != 3):
+        raise ValueError('incomplete provider or role review cannot be sealed')
     completed = next((r['payload']['result'] for r in _ledger(root, result.run_id).records()
                       if r['kind'] == 'TRIBUNAL_COMPLETED'), None)
-    if completed != payload:
+    if completed is None or TribunalResult.model_validate_json(json.dumps(completed)) != result:
         raise ValueError('only the persisted completed result can be sealed')
-    assert_no_leak(root, result.run_id, json.dumps(payload))
+    assert_no_leak(root, result.run_id, json.dumps(completed))
     seal = {'version': 'medic-blind-seal/1', 'case_id': result.case_id, 'run_id': result.run_id,
-            'snapshot_sha256': snapshot['snapshot_sha256'], 'result_sha256': sha256_digest(canonical_json_bytes(payload)),
+            'snapshot_sha256': snapshot['snapshot_sha256'], 'result_sha256': sha256_digest(canonical_json_bytes(completed)),
             'input_cutoff': snapshot['input_cutoff'], 'completed_at': result.created_at.isoformat()}
     _ledger(root, result.run_id).append_once('BLIND_RESULT_SEALED', result.run_id, seal)
     return seal

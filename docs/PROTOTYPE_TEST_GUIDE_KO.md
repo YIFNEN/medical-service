@@ -11,9 +11,9 @@
 
 | 순서 | 직접 준비할 항목 | 확인할 결과 |
 |---|---|---|
-| M1 합성 연결 시험 | OpenAI·Anthropic·Gemini API 키와 사용할 프로젝트의 결제 설정. 견적을 본 뒤 합성 시험 비용 상한 결정 | 같은 PowerShell에서 `doctor`의 세 `key_available`이 `true`. 시험 후 세 제공자가 `PASSED` |
+| M1 합성 연결 시험 | OpenAI API 키 하나와 프로젝트 결제 설정. 견적 확인 후 비용 상한 결정 | `doctor`에서 OpenAI `key_available: true`. 시험 후 OpenAI `PASSED` |
 | M5 수동 계측 | 로컬 CT 한 시리즈의 대상·좌우 확인. Slicer에서 두 점 거리 또는 세 점 각도의 기준점과 측정 방법 기록 | 내보낸 `review.json`을 가져와 `review ID` 확인. 비교 조건을 갖춘 두 시점이 있으면 각각 계측 |
-| M7 실자료 시험 | 동일 사례의 대표 문서 최대 3개, CT 1개, 확인할 질문과 개인 목표·제약. 문서 추출과 판단의 전송 범위 및 예산을 각각 결정 | 원문 연결, 검수, 질문, 근거, 세 모델 검토, 보고서, 봉인 후 비교를 확인 |
+| M7 실자료 시험 | 동일 사례의 대표 문서 최대 3개, CT 1개, 확인할 질문과 개인 목표·제약. 문서 추출과 판단의 전송 범위 및 예산을 각각 결정 | 원문 연결, 검수, 질문, 근거, 세 역할의 검토, 보고서, 봉인 후 비교를 확인 |
 
 처음에는 [8절의 키 설정과 합성 시험 견적](#8-비용전송-승인-후-실제-제공자-시험), 또는 [6절의 로컬 계측](#6-slicer-합성-왕복과-수동-계측) 중 준비된 쪽부터 진행한다. 두 시험은 독립적으로 진행할 수 있다.
 진행을 맡길 때는 키 원문 대신 `doctor`의 키 존재 여부, 승인할 단계와 USD 상한을 알려준다. 영상은 로컬에서 검수하고 필요한 경우 review ID와 measurement ID를 사용한다.
@@ -240,14 +240,12 @@ $ReviewPath = Read-Host 'Slicer가 출력한 review.json 절대 경로'
 
 ```powershell
 $env:OPENAI_API_KEY = ([pscredential]::new('api', (Read-Host 'OpenAI API key' -AsSecureString))).GetNetworkCredential().Password
-$env:ANTHROPIC_API_KEY = ([pscredential]::new('api', (Read-Host 'Anthropic API key' -AsSecureString))).GetNetworkCredential().Password
-$env:GEMINI_API_KEY = ([pscredential]::new('api', (Read-Host 'Gemini API key' -AsSecureString))).GetNetworkCredential().Password
 & $Python -X utf8 -m medic doctor --store $Store
 ```
 
 이 방식으로 설정한 키는 별도로 시작한 Codex 세션에 자동 전달되지 않는다. 이 경우 위 PowerShell에서 직접 시험을 실행한다. 별도 registry를 사용한다면 `api_key_env`에 지정한 이름과 일치시킨다. 시험이 끝나면 셸을 닫아 해당 세션의 키를 지운다.
 
-실행 전 선택한 프로젝트의 모델 접근 권한과 요금제를 확인한다. 공개 단가의 출처는 다음과 같다. [OpenAI API 가격](https://developers.openai.com/api/docs/pricing) · [Anthropic API 가격](https://platform.claude.com/docs/en/about-claude/pricing) · [Gemini API 가격](https://ai.google.dev/gemini-api/docs/pricing.md)
+실행 전 선택한 프로젝트의 모델 접근 권한과 요금제를 확인한다. [OpenAI API 가격](https://developers.openai.com/api/docs/pricing)
 
 먼저 합성 입력만 사용하는 smoke 견적:
 
@@ -262,7 +260,7 @@ $SmokeBudget = [double](Read-Host '별도로 승인한 smoke 예산 USD')
 & $Python -X utf8 -m medic providers smoke --run-id smoke-pilot-001 --approve-cost --budget-usd $SmokeBudget --approval-id smoke-pilot-001 --store $Store
 ```
 
-세 제공자 PASSED, 모델·응답 ID·사용량을 확인한다. 한 제공자 실패는 INCOMPLETE이고 같은 ID 재실행은 완료 호출을 재사용한다.
+OpenAI PASSED와 모델·응답 ID·사용량을 확인한다. 연결 시험은 합성 요청 1회다. 실패는 INCOMPLETE로 기록하며 같은 ID로 재실행하면 완료 호출을 재사용한다.
 결과를 공유할 때는 run ID, 제공자별 상태와 실패 유형만 사용한다. 합성 시험 승인은 실제 자료의 추출·판단과 별도로 다룬다.
 키 없음·미지원 모델·스키마·잘린 응답이면 설정을 수정하고 예산/모델을 바꿀 경우 새 run ID를 만든다.
 
@@ -289,7 +287,7 @@ $DecisionBudget = [double](Read-Host '별도로 승인한 판단 예산 USD')
 ```
 
 검색 검수로 일시 중단되는 것은 정상이다. 외부 검색은 비식별 임상 검색식만 사용하고 DICOM 원본은 보내지 않는다.
-완성 보고서는 `reports/pilot-001/`. 의견별 다른 두 제공자 비평과 세 제공자 종합 검토, 주장별 원문 근거·보류를 확인한다.
+완성 보고서는 `reports/pilot-001/`에 저장한다. 기록·계측 분석, 반증·대안 검토, 문헌·환자 적용성 검토가 같은 OpenAI 모델에 각각 요청을 보낸다. 각 1차 의견은 다른 두 역할의 비평을 받고 세 역할이 종합안을 검토한다. 보고서에서 역할, 주장별 원문 근거와 보류를 확인한다.
 비용과 개인 자료 전송 승인은 별개다. `--approve-cost`만으로 개인 입력을 전송하지 않는다.
 
 ## 9. 의견 가림·봉인·사후 비교
@@ -305,14 +303,14 @@ Copy-Item tests\fixtures\prototype\blind-review.json $BlindReview
 ```
 
 위 명령은 견적뿐이다. 별도 승인 후 같은 명령에 `--approve-cost --approve-transmission --budget-usd 승인액 --approval-id 새승인ID`를 붙인다.
-검색식 검토·재개는 8절과 같다. 해시·cutoff가 고정되고 완료된 세 제공자 결과만 BLIND_RESULT_SEALED로 봉인한다.
+검색식 검토·재개는 8절과 같다. 해시와 cutoff를 고정하고 세 역할의 분석과 최종 검토를 마치면 BLIND_RESULT_SEALED로 봉인한다.
 가림 mode의 문장 일치 검사는 완전한 의미적 비식별/가림 보장을 뜻하지 않으므로 입력 분류의 사람 검수가 필요하다.
 
 ```powershell
 & $Python -X utf8 -m pytest -q tests/test_blind_pipeline.py tests/test_blinding.py
 ```
 
-이 시험은 네트워크 연결을 차단하고 녹화 응답으로 검색 계획→선별→세 제공자 판단→보고서→봉인·비교를 확인한다.
+이 시험은 네트워크 연결을 차단하고 녹화 응답으로 검색 계획, 선별, 판단, 보고서, 봉인·비교를 확인한다. OpenAI 단일 경로의 합성 시험은 `python -m pytest -q tests/test_openai_workflow.py`로 실행한다.
 가린 문장이 검색식·중첩 메타데이터·모델 출력에 다시 나타나면 다음 외부 호출 전에 중단해야 한다.
 JSON 이스케이프 해석은 최대 16겹이며 더 깊으면 미승인 입력으로 중단한다.
 23개 종단 시나리오 통과는 의미적 가림·임상 정확도의 검증이 아니다.
@@ -352,5 +350,5 @@ AGREEMENT/CONFLICT/ASSUMPTION_DIFFERENCE/TIME_DIFFERENCE/INSUFFICIENT_EVIDENCE�
 
 실행 비교는 문서 사실·근거·계측·의견의 차이다. 촬영 조건이 다르면 차이를 악화·호전으로 해석하지 않는다.
 시험 기록에는 시각·코드 버전·명령·입출력 ID·증빙 경로·예상/실제·합격/실패/미검증·다음 행동을 기록한다.
-합성 수학 정답·기술적 Slicer 왕복·사람 기준점·실제 세 모델 실행·임상 정확도를 별도 행으로 기록한다.
+합성 수학 정답·기술적 Slicer 왕복·사람 기준점·실제 OpenAI 실행·임상 정확도를 별도 행으로 기록한다.
 개인 자료와 실행 산출물은 공개 저장소에 추가하지 않는다.

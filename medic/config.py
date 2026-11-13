@@ -59,10 +59,36 @@ class ModelRegistry(StrictFrozenModel):
     synthesis_review_output_tokens: int = 6_000
 
     @classmethod
-    def default(cls) -> "ModelRegistry":
+    def for_cli(cls) -> "ModelRegistry":
+        return cls.default(openai_only=True)
+
+    @property
+    def openai_only(self) -> bool:
+        return tuple(item.provider for item in self.providers) == ('openai',)
+
+    @property
+    def literature_provider(self) -> str:
+        return 'openai' if self.openai_only else 'anthropic'
+
+    @property
+    def review_providers(self) -> tuple[str, ...]:
+        if self.openai_only:
+            return ('openai',) * 3
+        return ('openai', 'anthropic', 'google')
+
+    @classmethod
+    def default(cls, *, openai_only: bool = False) -> "ModelRegistry":
         if os.environ.get("MEDIC_MODEL_REGISTRY"):
-            return cls.model_validate_json(Path(os.environ["MEDIC_MODEL_REGISTRY"]).read_bytes())
+            registry = cls.model_validate_json(Path(os.environ["MEDIC_MODEL_REGISTRY"]).read_bytes())
+            if openai_only:
+                providers = tuple(item for item in registry.providers if item.provider == 'openai')
+                if len(providers) != 1:
+                    raise ValueError('MEDIC_MODEL_REGISTRY must contain exactly one OpenAI entry')
+                registry = registry.model_copy(update={'providers': providers})
+            return registry
         defaults = {"OPENAI": "gpt-5.6-sol", "ANTHROPIC": "claude-opus-4-7", "GEMINI": "gemini-3.7-flash"}
+        if openai_only:
+            defaults = {"OPENAI": defaults["OPENAI"]}
         for name, model in defaults.items():
             if os.environ.get(f"MEDIC_{name}_MODEL", model) != model:
                 raise ValueError("custom model requires explicit model-specific pricing via a ModelRegistry; default prices cannot be reused")
@@ -93,7 +119,7 @@ class ModelRegistry(StrictFrozenModel):
                     output_usd_per_million=3.75,
                     reasoning="high",
                 ),
-            ),
+            )[:1 if openai_only else None],
         )
 
     def call_record(self, stage: str, response) -> ProviderCallRecord:
@@ -115,7 +141,9 @@ class ModelRegistry(StrictFrozenModel):
             ("synthesis_review", 1, self.synthesis_review_output_tokens),
         )
         lines: list[CostLine] = []
-        for provider in self.providers:
+        by_provider = {item.provider: item for item in self.providers}
+        for provider_name in self.review_providers:
+            provider = by_provider[provider_name]
             for stage, calls, output_tokens in stages:
                 estimated = calls * (
                     input_tokens_per_call * provider.input_usd_per_million
@@ -189,8 +217,8 @@ class ModelRegistry(StrictFrozenModel):
             input_tokens_per_call,
             (
                 ("document_extraction", "openai", self.analyst_output_tokens),
-                ("document_extraction", "google", self.analyst_output_tokens),
-                ("document_reconciliation", "anthropic", self.revision_output_tokens),
+                ("document_extraction", self.review_providers[2], self.analyst_output_tokens),
+                ("document_reconciliation", self.literature_provider, self.revision_output_tokens),
             ),
         )
         return self._combine_cost_lines(tuple(line.model_copy(update={
@@ -204,11 +232,11 @@ class ModelRegistry(StrictFrozenModel):
             input_tokens_per_call,
             tuple(
                 ("literature_planning", provider, self.peer_review_output_tokens)
-                for provider in ("openai", "anthropic", "google")
+                for provider in self.review_providers
             ),
         )
         appraisal = self._estimate_extra_stages(input_tokens_per_call,
-            tuple(("evidence_appraisal", "anthropic", 8000) for _ in range(evidence_limit)))
+            tuple(("evidence_appraisal", self.literature_provider, 8000) for _ in range(evidence_limit)))
         return self._combine_cost_lines(tribunal.lines + planning + appraisal)
 
     def estimate_full_workflow_cost(self, input_tokens_per_call: int) -> CostEstimate:
@@ -225,10 +253,10 @@ class ModelRegistry(StrictFrozenModel):
                                        'fulltext_limit': fulltext_limit}.items() if v is not None})
         settings = ProcessingSettings.model_validate(values)
         base = self.estimate_deliberation_cost(input_tokens_per_call, settings.evidence_limit)
-        stages = (('decision_issues', 'anthropic', 4000),)
-        stages += tuple(('screening', 'anthropic', 6000)
+        stages = (('decision_issues', self.literature_provider, 4000),)
+        stages += tuple(('screening', self.literature_provider, 6000)
                         for _ in range(ceil(settings.screening_limit / settings.screening_batch_size)))
-        stages += tuple(('fulltext_chunk', 'anthropic', 8000)
+        stages += tuple(('fulltext_chunk', self.literature_provider, 8000)
                         for _ in range(min(settings.fulltext_limit, settings.evidence_limit) * settings.fulltext_max_chunks))
         if clinician_comparison:
             stages += (('clinician_comparison', 'openai', self.synthesis_output_tokens),)

@@ -9,6 +9,7 @@ from typing import Iterable
 
 import markdown as markdown_library
 
+from .review_roles import review_label
 from .research_contracts import ConfirmedFactDetail, MedicalDecisionReport
 from .tribunal import TribunalResult
 
@@ -199,6 +200,8 @@ class ReportRenderer:
             f"- 추가 질문: {_safe_text(report.question_set.custom_question or '없음')}",
             f"- Degraded mode: {'예' if report.degraded else '아니오'}",
             f"- Labels: {_inline(report.labels)}",
+            *(['- 세 검토 역할은 같은 OpenAI 모델을 사용하므로 공통 오류가 남을 수 있습니다.']
+              if any(opinion.role_id is not None for opinion in report.opinions) else []),
             "",
             "## 2. 확인된 환자 사실과 원문 위치",
             "",
@@ -224,7 +227,7 @@ class ReportRenderer:
         for opinion in report.opinions:
             for domain in opinion.domain_assessments:
                 lines.extend([
-                    f"### {_safe_text(opinion.provider)}: {_safe_text(domain.domain)} ({domain.status})",
+                    f"### {_safe_text(review_label(opinion.provider, opinion.role_id))}: {_safe_text(domain.domain)} ({domain.status})",
                     _safe_text(domain.explanation), _detail("후보 가설", domain.hypotheses),
                     _detail("지지 사실 ID", domain.supporting_fact_ids), _detail("문헌 근거 ID", domain.evidence_ids),
                     _detail("반증", domain.counterevidence), _detail("불확실성", domain.uncertainties),
@@ -232,7 +235,7 @@ class ReportRenderer:
                 ])
             lines.extend(
                 [
-                    f"### {_safe_text(opinion.provider)} / {_safe_text(opinion.model)}",
+                    f"### {_safe_text(review_label(opinion.provider, opinion.role_id))} / {_safe_text(opinion.model)}",
                     "",
                     _safe_text(opinion.reasoning_summary),
                     "",
@@ -260,7 +263,7 @@ class ReportRenderer:
         for review in report.peer_reviews:
             lines.extend(
                 [
-                    f"### {_safe_text(review.reviewer_provider)} → {_safe_text(review.target_opinion_id)}: {_safe_text(review.verdict.value)}",
+                    f"### {_safe_text(review_label(review.reviewer_provider, review.role_id))} → {_safe_text(review.target_opinion_id)}: {_safe_text(review.verdict.value)}",
                     "",
                     _detail("강점", review.strengths),
                     _detail("누락", review.omissions),
@@ -277,7 +280,7 @@ class ReportRenderer:
         for revised in report.revised_opinions:
             lines.extend(
                 [
-                    f"### {_safe_text(revised.provider)}: {_safe_text(revised.disposition.value)}",
+                    f"### {_safe_text(review_label(revised.provider, revised.role_id))}: {_safe_text(revised.disposition.value)}",
                     "",
                     _safe_text(revised.reasoning_summary),
                     "",
@@ -319,7 +322,7 @@ class ReportRenderer:
         )
         for review in report.synthesis_reviews:
             lines.extend((
-                f"#### {_safe_text(review.reviewer_provider)}: {_safe_text(review.verdict.value)}",
+                f"#### {_safe_text(review_label(review.reviewer_provider, review.role_id))}: {_safe_text(review.verdict.value)}",
                 "",
                 _detail("지지 지점", review.supported_points),
                 _detail("이의", review.objections),

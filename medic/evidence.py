@@ -14,6 +14,7 @@ from .providers import ApprovedGateway
 from .research_contracts import EvidenceCard, QuestionSet, StrictFrozenModel
 from .guidelines import OfficialAnkleGuidelineSource
 from .search_transport import get, validate_query
+from .review_roles import REVIEW_ROLES
 
 
 class Picots(StrictFrozenModel):
@@ -40,10 +41,10 @@ class LiteraturePlanSet(StrictFrozenModel):
 
 class LiteratureSearchPlanner:
     def __init__(self, gateways: dict[str, ApprovedGateway], registry: ModelRegistry | None = None) -> None:
-        if set(gateways) != {"openai", "anthropic", "google"}:
-            raise ValueError("literature planning requires all three providers")
         self.gateways = gateways
         self.registry = registry or ModelRegistry.default()
+        if set(gateways) != set(self.registry.review_providers):
+            raise ValueError("literature planning gateways must match the configured providers")
 
     def plan(self, questions: QuestionSet, patient_context: dict[str, Any], estimate: CostEstimate, *, ledger=None) -> LiteraturePlanSet:
         payload = {"questions": questions.model_dump(mode="json"), "patient_context": patient_context}
@@ -56,9 +57,13 @@ class LiteratureSearchPlanner:
             + json.dumps(payload, ensure_ascii=False, sort_keys=True)
         )
         plans: list[LiteratureSearchPlan] = []
-        for provider in ("openai", "anthropic", "google"):
+        for index, provider in enumerate(self.registry.review_providers):
+            role_prompt = prompt
+            if self.registry.openai_only:
+                role_id = tuple(REVIEW_ROLES)[index]
+                role_prompt = f"Search perspective {role_id}: {REVIEW_ROLES[role_id][1]}\n{prompt}"
             kwargs = dict(
-                stage="LITERATURE_SEARCH_PLANNING", prompt=prompt,
+                stage="LITERATURE_SEARCH_PLANNING", prompt=role_prompt,
                 output_model=LiteratureSearchPlan, estimate=estimate,
                 max_output_tokens=self.registry.peer_review_output_tokens,
             )

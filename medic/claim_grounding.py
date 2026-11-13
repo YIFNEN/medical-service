@@ -1,3 +1,4 @@
+from .review_roles import review_label
 import json
 import re
 
@@ -122,7 +123,7 @@ def ground_synthesis(synthesis, reviews, evidence, patient):
         for audit in review.claim_reviews:
             reasons = []
             if audit.verdict != "SUPPORTED":
-                reasons.append(f"{review.reviewer_provider}: {audit.rationale}")
+                reasons.append(f"{review_label(review.reviewer_provider, review.role_id)}: {audit.rationale}")
                 if audit.verdict == 'CONTRADICTED':
                     statuses[audit.claim_id] = 'CONFLICT'
             if set(audit.evidence_ids) - set(cards) or set(audit.patient_fact_ids) - facts:

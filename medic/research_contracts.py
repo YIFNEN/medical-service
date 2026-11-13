@@ -11,6 +11,7 @@ from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, HttpUrl, field
 
 from .model_base import StrictFrozenModel
 from .questions import AdditionalTestProposal, QuestionClaim
+from .review_roles import ReviewRole
 
 
 ANKLE_REVIEW_DOMAINS = (
@@ -169,6 +170,7 @@ class DomainAssessment(StrictFrozenModel):
 
 
 class IndependentOpinion(StrictFrozenModel):
+    role_id: ReviewRole | None = Field(default=None, exclude_if=lambda value: value is None)
     opinion_id: str
     provider: str
     model: str
@@ -189,6 +191,7 @@ class ReviewVerdict(StrEnum):
 
 
 class PeerReview(StrictFrozenModel):
+    role_id: ReviewRole | None = Field(default=None, exclude_if=lambda value: value is None)
     review_id: str
     reviewer_provider: str
     reviewer_model: str
@@ -205,6 +208,7 @@ class PeerReview(StrictFrozenModel):
 
 
 class PeerReviewBatch(StrictFrozenModel):
+    role_id: ReviewRole | None = Field(default=None, exclude_if=lambda value: value is None)
     reviewer_provider: str
     reviewer_model: str
     provider_response_id: str
@@ -218,6 +222,7 @@ class RevisionDisposition(StrEnum):
 
 
 class RevisedOpinion(StrictFrozenModel):
+    role_id: ReviewRole | None = Field(default=None, exclude_if=lambda value: value is None)
     revised_opinion_id: str
     original_opinion_id: str
     provider: str
@@ -302,6 +307,7 @@ class WithheldClaim(StrictFrozenModel):
 
 
 class SynthesisReview(StrictFrozenModel):
+    role_id: ReviewRole | None = Field(default=None, exclude_if=lambda value: value is None)
     synthesis_review_id: str
     reviewer_provider: str
     reviewer_model: str

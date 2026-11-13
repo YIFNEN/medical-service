@@ -112,11 +112,11 @@ class ClinicalExtractionService:
         gateways: dict[str, ApprovedGateway],
         registry: ModelRegistry | None = None,
     ) -> None:
-        if set(gateways) != {"openai", "google", "anthropic"}:
-            raise ValueError("extraction requires openai, google and anthropic gateways")
         self.root = Path(root)
         self.gateways = gateways
         self.registry = registry or ModelRegistry.default()
+        if set(gateways) != set(self.registry.review_providers):
+            raise ValueError("extraction gateways must match the configured providers")
 
     def extract(self, intake: FileIntakeResult, estimate: CostEstimate) -> ExtractionResult:
         if not estimate.approved:
@@ -195,10 +195,15 @@ class ClinicalExtractionService:
         )
         batches: list[ClinicalFactBatch] = []
         calls: list[ProviderCallRecord] = []
-        for provider in ("openai", "google"):
+        for index, provider in enumerate((self.registry.review_providers[0], self.registry.review_providers[2])):
+            extraction_prompt = prompt
+            if self.registry.openai_only:
+                focus = ("Extract the documented observations and their original context.",
+                         "Audit negation, dates, laterality, conflicts and what the source leaves uncertain.")[index]
+                extraction_prompt = f"{focus}\n{prompt}"
             response = cached_generate(ledger, self.gateways[provider], scope=cache_key,
                 stage="DOCUMENT_FACT_EXTRACTION",
-                prompt=prompt,
+                prompt=extraction_prompt,
                 output_model=ClinicalFactBatch,
                 estimate=estimate,
                 max_output_tokens=self.registry.analyst_output_tokens,
@@ -233,7 +238,7 @@ class ClinicalExtractionService:
                 sort_keys=True,
             )
         )
-        response = cached_generate(ledger, self.gateways["anthropic"], scope=cache_key,
+        response = cached_generate(ledger, self.gateways[self.registry.literature_provider], scope=cache_key,
             stage="DOCUMENT_FACT_RECONCILIATION",
             prompt=reconcile_prompt,
             output_model=FactReconciliation,

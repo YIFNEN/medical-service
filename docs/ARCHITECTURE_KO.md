@@ -24,7 +24,7 @@ DICOM의 좌표와 간격을 확인한 뒤 Slicer에서 수동 기준점과 영�
 |---|---|---|
 | 설정·입력 고정 | `settings.py`, `workflow.py`, `tribunal.py` | 실행별 설정·입력·정책 버전, 변경된 조건으로 재개 거부 |
 | 도구 호출과 복구 | `call_cache.py`, `budget.py`, `ledger.py` | 승인·호출 전 예약·사용량·성공 응답 저장·중단 후 재개 |
-| 여러 모델의 역할 | `tribunal.py` | 세 독립 의견, 다른 두 제공자의 비평, 수정, 종합과 세 제공자 검토 |
+| 세 검토 역할 | `tribunal.py` | OpenAI에 역할별로 독립 요청. 각 의견을 다른 두 역할이 비평하고 수정·종합 후 세 역할이 주장별로 검토 |
 | 판단의 사용 자격 | `question_runtime.py`, `claim_grounding.py` | 질문별 허용 자료, 출처·수치·개인 조건 검사, 실패한 주장과 의존 행동 보류 |
 | 의견 가림·봉인 | `blinding.py`, `clinician_comparison.py` | 검색·요청의 의견 유출 검사, 결과 봉인 후 별도 사후 비교 |
 | 사람의 검수와 출력 | `case_context.py`, `imaging_cli.py`, `reporting.py` | 검수 이력·영상 원본 연결·제안의 조건과 미해결 사항 표시 |

@@ -17,8 +17,8 @@ def smoke(root, run_id, gateways, registry, estimate):
     validate_run_id(run_id)
     if not estimate.approved:
         raise PermissionError('explicit cost approval required for provider smoke')
-    if set(gateways) != {'openai', 'anthropic', 'google'}:
-        raise ValueError('all three providers are required')
+    if set(gateways) != {item.provider for item in registry.providers}:
+        raise ValueError('smoke gateways must match the configured providers')
     ledger = AppendOnlyJsonlLedger(Path(root) / 'provider-checks' / run_id / 'ledger.jsonl')
     ledger.append_once('SMOKE_CREATED', run_id, {'registry': registry.model_dump(mode='json'),
         'models': {key: value.model for key, value in gateways.items()},
@@ -57,7 +57,7 @@ def execute(args):
     from .config import ModelRegistry
     from .extended_cli import approved_estimate
     from .providers import build_live_gateways
-    registry = ModelRegistry.default()
+    registry = ModelRegistry.for_cli()
     estimate = registry._combine_cost_lines(registry._estimate_extra_stages(args.input_tokens,
         tuple(('provider_smoke', p.provider, 1024) for p in registry.providers)))
     estimate = estimate.model_copy(update={'data_scope': 'SYNTHETIC'})

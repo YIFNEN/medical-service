@@ -81,8 +81,9 @@ class ResearchWorkflow:
                     raise PermissionError('review literature search-plan, then resume with --approve-search')
                 ledger.append_once('SEARCH_APPROVED', search_key, {'queries': list(plans.queries)})
             evidence = self.retriever.search(plans.queries, ledger=ledger)
-            appraiser = EvidenceAppraiser(self.gateways["anthropic"], ledger, self.registry, settings)
-            screener = LiteratureScreener(self.gateways['anthropic'], ledger, self.registry, settings)
+            literature_gateway = self.gateways[self.registry.literature_provider]
+            appraiser = EvidenceAppraiser(literature_gateway, ledger, self.registry, settings)
+            screener = LiteratureScreener(literature_gateway, ledger, self.registry, settings)
             issues = screener.issues(question_set, patient_context, approved)
             candidates = sorted(evidence.cards, key=lambda c: (not (c.source == 'GUIDELINE' or
                 any(term in c.study_design.lower() for term in ('systematic', 'meta-analysis'))), c.evidence_id))
