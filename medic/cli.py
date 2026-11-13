@@ -231,6 +231,9 @@ def _latest_context(ledger: AppendOnlyJsonlLedger, case_id: str) -> dict[str, An
             continue
         if record['kind'] == 'IMAGE_OBSERVATIONS_REVIEWED' and record['payload'].get('case_id') == case_id:
             found = True
+            for key in record['payload'].get('withdrawn_fact_ids', ()):
+                facts_by_key.pop(key, None)
+                uncertainties.append(f'Imaging observation withdrawn: {key}')
             for detail in record['payload']['facts']:
                 key = detail['fact_id']
                 if key not in key_order:

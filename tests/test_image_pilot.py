@@ -5,14 +5,17 @@ import pytest
 from PIL import Image
 from pydicom.uid import DigitalXRayImageStorageForPresentation
 
-from medic.cli import main
+from medic.blinding import create_blind_input
+from medic.cli import _latest_context, main
 from medic.config import CostEstimate, ModelRegistry
 from medic.extended_cli import save_json
 from medic.image_pilot import analyze, compare, prepare, redact, review_observations
 from medic.imaging import inspect_inventory
 from medic.inventory import scan
-from medic.ledger import sha256_digest
+from medic.ledger import AppendOnlyJsonlLedger, sha256_digest
 from medic.providers import ApprovedGateway, RawProviderResponse
+from medic.question_runtime import available_references
+from medic.research_contracts import QuestionSet
 from tests.test_imaging import dicom
 
 
@@ -56,7 +59,7 @@ def test_rejects_ct_with_noncanonical_slice_order(sources):
         prepare(root, manifest, 'synthetic', ct.SeriesInstanceUID, dx.SeriesInstanceUID)
 
 
-def test_image_calls_are_blind_and_sealed_before_source_comparison(sources, tmp_path):
+def test_image_calls_are_blind_and_sealed_before_source_comparison(sources, tmp_path, capsys):
     root, path, ct, dx = sources
     result = prepare(root, json.loads(path.read_text(encoding='utf-8')), 'synthetic',
                      ct.SeriesInstanceUID, dx.SeriesInstanceUID)
@@ -138,4 +141,95 @@ def test_image_calls_are_blind_and_sealed_before_source_comparison(sources, tmp_
         review_observations(root, sealed['path'], review_path)
     observation['observations'][0]['observation'] = 'A contour is visible.'
     review_path.write_text(json.dumps(observation), encoding='utf-8')
-    assert review_observations(root, sealed['path'], review_path)['status'] == 'USER_REVIEWED'
+    first = review_observations(root, sealed['path'], review_path)
+    assert first['status'] == 'USER_REVIEWED'
+    assert review_observations(root, sealed['path'], review_path) == first
+    fact_id, = first['fact_ids']
+    ledger = AppendOnlyJsonlLedger(root / 'ledger.jsonl')
+    original = _latest_context(ledger, 'synthetic')
+    assert available_references(original).fact_ids == {fact_id}
+    classification_path = tmp_path / 'classification.json'
+    classification_path.write_text(json.dumps({
+        'schema_version': 'source-input-review/1', 'fact_id': fact_id,
+        'context': {'case_id': 'synthetic', 'anatomy': 'ankle', 'laterality': 'left'},
+        'classification': 'observation', 'missingness': 'present',
+    }), encoding='utf-8')
+    assert main(['case', 'review-input', '--case', 'synthetic', '--file', str(classification_path),
+                 '--reviewer', 'reviewer', '--reason', 'source reviewed', '--store', str(root)]) == 0
+    classification = json.loads(capsys.readouterr().out)
+    questions = QuestionSet.for_comprehensive_review('synthetic').model_dump(mode='json')
+    approval = {'schema_version': 'medic-blind-approval/1', 'case_id': 'synthetic',
+                'questions_reviewed': True, 'reviewer': 'reviewer', 'reason': 'synthetic test'}
+    visible = create_blind_input(root, 'before-amendment', 'synthetic', _latest_context(ledger, 'synthetic'),
+                                 questions, approval)
+    assert available_references(visible).fact_ids == {fact_id}
+
+    item = observation['observations'][0]
+    item['observation'] = 'Only a short contour is visible.'
+    review_path.write_text(json.dumps(observation), encoding='utf-8')
+    with pytest.raises(ValueError, match='current review event'):
+        review_observations(root, sealed['path'], review_path)
+    item['replaces_event_id'] = first['event_id']
+    observation['reason'] = 'Rechecked the source pixels'
+    review_path.write_text(json.dumps(observation), encoding='utf-8')
+    amendment = review_observations(root, sealed['path'], review_path)
+    assert amendment['fact_ids'] == [fact_id]
+    assert review_observations(root, sealed['path'], review_path) == amendment
+    amended = _latest_context(ledger, 'synthetic')
+    assert amended['fact_details'][0]['value'] == item['observation']
+    assert amended['case_context']['stale_input_review_ids'] == [classification['event_id']]
+    amended_visible = create_blind_input(root, 'after-amendment', 'synthetic', amended, questions, approval)
+    assert not available_references(amended_visible).fact_ids
+    assert visible['fact_details'][0]['value'] == 'A contour is visible.'
+    assert original['fact_details'][0]['value'] == 'A contour is visible.'
+
+    item.pop('observation')
+    item['withdraw'] = True
+    review_path.write_text(json.dumps(observation), encoding='utf-8')
+    with pytest.raises(ValueError, match='current review event'):
+        review_observations(root, sealed['path'], review_path)
+    item['replaces_event_id'] = amendment['event_id']
+    review_path.write_text(json.dumps(observation), encoding='utf-8')
+    withdrawal = review_observations(root, sealed['path'], review_path)
+    assert withdrawal['withdrawn_fact_ids'] == [fact_id]
+    assert available_references(_latest_context(ledger, 'synthetic')).fact_ids == set()
+    assert len([r for r in ledger.records() if r['kind'] == 'IMAGE_OBSERVATIONS_REVIEWED']) == 3
+
+
+def test_image_pilot_reports_partial_run_and_resumes_completed_call(sources, capsys):
+    root, path, ct, dx = sources
+    result = prepare(root, json.loads(path.read_bytes()), 'synthetic', ct.SeriesInstanceUID, dx.SeriesInstanceUID)
+    registry = ModelRegistry.for_cli()
+    estimate = CostEstimate(pricing_as_of=registry.pricing_as_of, lines=(), call_count=2, estimated_usd=None,
+                            approved=True, backend='codex', codex_calls=3, transmission_approved=True)
+    calls = []
+
+    class FakeCodex:
+        backend = 'codex'
+        provider = 'openai'
+        model = 'test'
+
+        def generate_raw(self, *, stage, **kwargs):
+            calls.append(stage)
+            if len(calls) == 2:
+                raise RuntimeError('simulated lost response')
+            return RawProviderResponse({'candidates': [], 'limitations': ['Selected images only']}, stage)
+
+    args = (root, 'partial', result['path'], result['input_sha256'], 'reviewer', estimate,
+            registry, ApprovedGateway(FakeCodex()))
+    with pytest.raises(RuntimeError, match='lost response'):
+        analyze(*args)
+    cli = ['dicom', 'status-pilot', '--run-id', 'partial', '--store', str(root)]
+    assert main(cli) == 0
+    status = json.loads(capsys.readouterr().out)
+    assert status['status'] == 'INCOMPLETE'
+    assert status['completed_modalities'] == ['CT']
+    assert status['attempts_reserved'] == 2
+    assert status['attempts_remaining'] == 1
+    sealed = analyze(*args)
+    assert calls == ['IMAGE_PILOT_CT', 'IMAGE_PILOT_XRAY', 'IMAGE_PILOT_XRAY']
+    assert main(cli) == 0
+    status = json.loads(capsys.readouterr().out)
+    assert status['status'] == 'SEALED'
+    assert status['result_sha256'] == sealed['result_sha256']
+    assert status['attempts_remaining'] == 0

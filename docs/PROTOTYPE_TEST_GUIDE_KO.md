@@ -266,6 +266,12 @@ $Seal = & $Python -X utf8 -m medic dicom analyze-pilot --input $Preview.path `
 
 두 응답이 검증되면 `SEALED`와 `result_sha256`을 반환한다. 봉인 파일에는 이미지 ID와 영역, 후보 관찰, 불확실성, 커버리지 한계가 있다. 판독문은 봉인 이후 로컬에서 대조한다. `$CompareReview`에 다음 예시의 해시·경로·UID와 원문 구절을 실제 값으로 교체해 저장한다. 후보와 판독 항목 번호는 각각 1부터 시작하며 모든 항목의 대응을 기록한다.
 
+실행이 중단되면 호출 없이 아래 명령으로 완료한 영상 종류와 예약된 시도 수를 확인한다. `INCOMPLETE`이고 `attempts_remaining`이 남아 있으면 승인 당시의 입력·해시·검수자·상한과 같은 명령으로 재개한다.
+
+```powershell
+& $Python -X utf8 -m medic dicom status-pilot --run-id image-pilot-001 --store $Store
+```
+
 ```json
 {
   "result_sha256": "sha256:REPLACE_WITH_SEAL_HASH",
@@ -294,6 +300,8 @@ $Seal = & $Python -X utf8 -m medic dicom analyze-pilot --input $Preview.path `
 ```
 
 `USER_REVIEWED`의 fact ID를 사례 입력 검수에서 `observation`으로 분류하면 가림 모드에서 사용할 수 있다. 정량 지표에는 6절의 Slicer 계측 경로를 사용한다.
+
+정정할 때는 같은 후보 항목에 새 `observation`과 현재 검수 이벤트의 `replaces_event_id`를 넣고, 최상위에 `reason`을 기록해 `review-pilot`을 다시 실행한다. 철회는 해당 항목의 `observation`을 제거하고 `withdraw: true`와 `replaces_event_id`를 지정한다. 정정 후에는 바뀐 내용을 사례 입력에서 다시 분류한다. 철회된 관찰은 새 판단에서 빠지며, 이전 실행의 봉인과 관찰 이력은 조회할 수 있다.
 
 ### Codex 구독으로 실행
 

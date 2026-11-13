@@ -450,6 +450,26 @@ def _load_seal(root, sealed_path):
     return sealed, seal_hash
 
 
+def pilot_status(root, identifier):
+    root = _store(root)
+    records = _pilot_ledger(root, identifier).records()
+    created = next((r['payload'] for r in records if r['kind'] == 'IMAGE_PILOT_CREATED'), None)
+    if created is None:
+        raise ValueError('unknown image pilot run')
+    seal = next((r['payload'] for r in records if r['kind'] == 'IMAGE_PILOT_SEALED'), None)
+    stages = {r['payload']['stage'] for r in records if r['kind'] == 'PROVIDER_CALL_COMPLETED'}
+    estimate = created['estimate']
+    reserved = sum(r['kind'] == 'CODEX_ATTEMPT_RESERVED' and r['payload']['approval_id'] == estimate['approval_id']
+                   for r in records)
+    result = {'run_id': identifier, 'status': 'SEALED' if seal else 'INCOMPLETE',
+              'input_sha256': created['input_sha256'],
+              'completed_modalities': [mode for mode in ('CT', 'XRAY') if 'IMAGE_PILOT_' + mode in stages],
+              'attempts_reserved': reserved, 'attempts_remaining': estimate['codex_calls'] - reserved}
+    if seal:
+        result['result_sha256'] = seal['sha256']
+    return result
+
+
 def _reference_quotes(raw, suffix, references, password):
     def normalize(value):
         return ' '.join(value.split())
@@ -518,7 +538,7 @@ def compare(root, sealed_path, review_path, *, password=None):
 
 
 def review_observations(root, sealed_path, review_path):
-    """Admit only independently confirmed visual observations to the case."""
+    """Record confirmed observations and append explicit corrections or withdrawals."""
     from .ledger import deterministic_id
 
     root = _store(root)
@@ -527,34 +547,69 @@ def review_observations(root, sealed_path, review_path):
     if (review.get('result_sha256') != digest or review['case_id'] != sealed['case_id'] or not review['reviewer'].strip()
             or review['source_pixels_reviewed'] is not True):
         raise ValueError('same-case review against original pixels required')
-    facts = []
+    facts, withdrawals, replacements = [], [], {}
     for item in review['observations']:
         modality = item['modality']
         index = item['candidate_index']
-        statement = item['observation'].strip()
         candidates = sealed['results'][modality]['findings']['candidates']
-        if type(index) is not int or not 1 <= index <= len(candidates) or not statement:
-            raise ValueError('review must reference an existing candidate and include a reviewed statement')
+        if type(index) is not int or not 1 <= index <= len(candidates):
+            raise ValueError('review must reference an existing candidate')
+        fact_id = deterministic_id('visual-review', {'seal': digest, 'modality': modality, 'index': index})
+        if fact_id in replacements:
+            raise ValueError('review must contain distinct observations')
+        replacements[fact_id] = item.get('replaces_event_id')
+        if item.get('withdraw') is True:
+            if item.get('observation') is not None or not replacements[fact_id]:
+                raise ValueError('withdrawal requires only the current review event and candidate')
+            withdrawals.append(fact_id)
+            continue
+        statement = item.get('observation', '').strip()
+        if not statement:
+            raise ValueError('reviewed observation required')
         if re.search(r'\d\s*(?:mm|cm|degrees?|°|도|밀리미터|센티미터|%)', statement, re.I):
             raise ValueError('quantitative values require the Slicer measurement path')
         candidate = candidates[index - 1]
-        fact_id = deterministic_id('visual-review', {'seal': digest, 'modality': modality, 'index': index})
         facts.append({
             'fact_id': fact_id, 'fact_key': 'reviewed_visual_observation', 'value': statement,
             'source_locators': [f"image-pilot:{digest}:{candidate['image_id']}:{index}"],
             'user_confirmed': True, 'confirmation_scope': 'IMAGE_OBSERVATION_REVIEWED',
             'scope': {'modality': modality, 'assertion': 'UNKNOWN', 'source_kind': 'UNKNOWN'},
         })
-    if not facts or len({f['fact_id'] for f in facts}) != len(facts):
-        raise ValueError('review must contain distinct confirmed observations')
+    if not replacements:
+        raise ValueError('review must contain at least one observation')
     payload = {'case_id': sealed['case_id'], 'reviewer': review['reviewer'], 'seal_sha256': digest, 'facts': facts}
+    if any(replacements.values()):
+        reason = review.get('reason', '').strip()
+        if not reason:
+            raise ValueError('an amendment or withdrawal requires a reason')
+        payload.update(reason=reason, replaces={key: event for key, event in replacements.items() if event},
+                       withdrawn_fact_ids=withdrawals)
     ledger = AppendOnlyJsonlLedger(_inside(root, root / 'ledger.jsonl'))
-    event_id = ledger.append_once('IMAGE_OBSERVATIONS_REVIEWED', deterministic_id('visual-review-event', payload), payload)
-    return {'status': 'USER_REVIEWED', 'event_id': event_id, 'fact_ids': [f['fact_id'] for f in facts]}
+    kind = 'IMAGE_OBSERVATIONS_REVIEWED'
+    key = deterministic_id('visual-review-event', payload)
+    with ledger.key_lock('image-observation-review', sealed['case_id']):
+        history = [r for r in ledger.records() if r['kind'] == kind and r['payload']['case_id'] == sealed['case_id']]
+        existing = next((r for r in history if r['natural_key'] == key), None)
+        heads, inactive = {}, set()
+        for record in history:
+            for fact in record['payload']['facts']:
+                heads[fact['fact_id']] = record['record_id']
+                inactive.discard(fact['fact_id'])
+            for identifier in record['payload'].get('withdrawn_fact_ids', ()):
+                heads[identifier] = record['record_id']
+                inactive.add(identifier)
+        if not existing:
+            if any(heads.get(identifier) != event for identifier, event in replacements.items()):
+                raise ValueError('explicit replacement of the current review event is required')
+            if inactive.intersection(withdrawals):
+                raise ValueError('only an active observation can be withdrawn')
+        event_id = ledger.append_once(kind, key, payload)
+    return {'status': 'WITHDRAWN' if withdrawals and not facts else 'USER_REVIEWED',
+            'event_id': event_id, 'fact_ids': [f['fact_id'] for f in facts], 'withdrawn_fact_ids': withdrawals}
 
 
 def register(parsers):
-    for action in ('prepare-pilot', 'redact-pilot', 'analyze-pilot', 'compare-pilot', 'review-pilot'):
+    for action in ('prepare-pilot', 'redact-pilot', 'analyze-pilot', 'status-pilot', 'compare-pilot', 'review-pilot'):
         parser = parsers.add_parser(action)
         parser.add_argument('--store', type=Path, default=Path('.medic'))
         if action == 'prepare-pilot':
@@ -565,6 +620,8 @@ def register(parsers):
         elif action == 'redact-pilot':
             parser.add_argument('--input', type=Path, required=True)
             parser.add_argument('--masks', type=Path, required=True)
+        elif action == 'status-pilot':
+            parser.add_argument('--run-id', required=True)
         elif action == 'analyze-pilot':
             parser.add_argument('--input', type=Path, required=True)
             parser.add_argument('--run-id', required=True)
@@ -585,6 +642,8 @@ def execute(args):
     if args.action == 'prepare-pilot':
         return 0, prepare(args.store, read_json(args.manifest), args.case, args.ct_series,
                           args.xray_series, args.xray_hash)
+    if args.action == 'status-pilot':
+        return 0, pilot_status(args.store, args.run_id)
     if args.action == 'compare-pilot':
         from getpass import getpass
 
