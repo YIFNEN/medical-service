@@ -128,6 +128,13 @@ class ResearchCliTests(unittest.TestCase):
                               "--pdf-page", *invalid, "--codex-calls", "3", "--approve-transmission"])
                     gateways.assert_not_called()
 
+            other_page = next(block for block in intake.blocks if block.page_number == 5)
+            Image.new("RGB", (10, 10)).save(other_page.rendered_image_path)
+            with patch("medic.cli.build_live_gateways") as gateways:
+                with self.assertRaisesRegex(ValueError, "PDF page image does not match"):
+                    main(approved)
+                gateways.assert_not_called()
+
     def test_scoped_review_rejects_non_pdf_from_legacy_intake(self):
         from medic.intake import FileIntakeService
         from medic.ledger import ContentAddressedStore

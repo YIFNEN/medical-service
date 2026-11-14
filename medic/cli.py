@@ -203,19 +203,36 @@ def _select_pdf_pages(
         selected.add((artifact_id, page))
     selected_pdf_ids = {artifact_id for artifact_id, _ in selected}
     files = tuple(file for file in intake.files if file.artifact.artifact_id in selected_pdf_ids)
+    blocks = tuple(block for block in intake.blocks
+                   if (block.artifact_id, block.page_number) in selected)
+    verified_images = {}
     for file in files:
-        raw_path = store.read_raw(file.artifact)
+        artifact = file.artifact
+        raw_path = store.read_raw(artifact)
         with pymupdf.open(raw_path) as document:
             if not document.is_pdf:
                 raise ValueError("PDF page selection requires the original PDF format")
+            for block in blocks:
+                if block.artifact_id != artifact.artifact_id or not block.rendered_image_path:
+                    continue
+                image_path = (store.root.resolve() / "derived" / "intake" / artifact.artifact_id
+                              / f"page-{block.page_number}.png")
+                page = document[block.page_number - 1]
+                png = page.get_pixmap(matrix=pymupdf.Matrix(2, 2), alpha=False).tobytes("png")
+                if not image_path.is_file() or image_path.read_bytes() != png:
+                    raise ValueError("PDF page image does not match the verified original")
+                verified_images[block.block_id] = str(image_path)
     return FileIntakeResult(
         intake_id=deterministic_id("selected-pdf-intake", {
             "parent": intake.intake_id, "pages": sorted(selected),
         }),
         case_id=intake.case_id,
         files=files,
-        blocks=tuple(block for block in intake.blocks
-                     if (block.artifact_id, block.page_number) in selected),
+        blocks=tuple(
+            block.model_copy(update={"rendered_image_path": verified_images[block.block_id]})
+            if block.block_id in verified_images else block
+            for block in blocks
+        ),
     )
 
 
