@@ -118,10 +118,14 @@ class ClinicalExtractionService:
         if set(gateways) != set(self.registry.review_providers):
             raise ValueError("extraction gateways must match the configured providers")
 
-    def extract(self, intake: FileIntakeResult, estimate: CostEstimate) -> ExtractionResult:
+    def extract(
+        self, intake: FileIntakeResult, estimate: CostEstimate, *,
+        verified_image_paths: dict[str, Path] | None = None,
+    ) -> ExtractionResult:
         if not estimate.approved:
             raise PermissionError("explicit cost approval is required before document extraction")
-        results = tuple(self._extract_batch(batch, estimate) for batch in extraction_batches(intake))
+        results = tuple(self._extract_batch(batch, estimate, verified_image_paths or {})
+                        for batch in extraction_batches(intake))
         result = ExtractionResult(
             extraction_id=deterministic_id("clinical-extraction-v2", {
                 "intake_id": intake.intake_id, "batches": [item.extraction_id for item in results]}),
@@ -141,7 +145,9 @@ class ClinicalExtractionService:
         )
         return result
 
-    def _extract_batch(self, intake: FileIntakeResult, estimate: CostEstimate) -> ExtractionResult:
+    def _extract_batch(
+        self, intake: FileIntakeResult, estimate: CostEstimate, verified_image_paths: dict[str, Path],
+    ) -> ExtractionResult:
         ledger = AppendOnlyJsonlLedger(self.root / "ledger.jsonl")
         cache_key = deterministic_id("extraction-v2", {
             "intake": intake.intake_id, "registry": self.registry.model_dump(mode="json"),
@@ -210,7 +216,7 @@ class ClinicalExtractionService:
             "UNTRUSTED SOURCE JSON:\n" + json.dumps(source_payload, ensure_ascii=False, sort_keys=True)
         )
         image_paths = tuple(
-            Path(block.rendered_image_path)
+            verified_image_paths.get(block.block_id, Path(block.rendered_image_path))
             for block in intake.blocks
             if block.rendered_image_path
         )

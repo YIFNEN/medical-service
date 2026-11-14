@@ -6,6 +6,7 @@ import json
 import uuid
 from datetime import date
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any, Sequence
 
 import pymupdf
@@ -74,6 +75,7 @@ def _parser() -> argparse.ArgumentParser:
     review.add_argument("--interactive", action="store_true")
     review.add_argument("--pdf-page", action="append", nargs=2, metavar=("ARTIFACT_ID", "PAGE"),
                         help="limit extraction to these original 1-based PDF pages; repeat to select more")
+    review.add_argument("--pdf-password-prompt", action="store_true")
     review.add_argument("--approve-cost", action="store_true")
     review.add_argument("--input-tokens", type=int, default=10_000)
     review.add_argument("--store", type=Path, required=True)
@@ -188,7 +190,8 @@ def _latest_intake(ledger: AppendOnlyJsonlLedger, case_id: str) -> FileIntakeRes
 
 def _select_pdf_pages(
     intake: FileIntakeResult, requests: list[list[str]], store: ContentAddressedStore,
-) -> FileIntakeResult:
+    *, prompt_password: bool = False,
+) -> tuple[FileIntakeResult, dict[str, bytes]]:
     pdf_ids = {file.artifact.artifact_id for file in intake.files if file.kind == InputKind.PDF}
     available = {(block.artifact_id, block.page_number) for block in intake.blocks
                  if block.artifact_id in pdf_ids}
@@ -205,13 +208,18 @@ def _select_pdf_pages(
     files = tuple(file for file in intake.files if file.artifact.artifact_id in selected_pdf_ids)
     blocks = tuple(block for block in intake.blocks
                    if (block.artifact_id, block.page_number) in selected)
-    verified_images = {}
+    verified_images: dict[str, bytes] = {}
     for file in files:
         artifact = file.artifact
         raw_path = store.read_raw(artifact)
         with pymupdf.open(raw_path) as document:
             if not document.is_pdf:
                 raise ValueError("PDF page selection requires the original PDF format")
+            if document.needs_pass:
+                if not prompt_password:
+                    raise ValueError("PDF password required; use --pdf-password-prompt")
+                if not document.authenticate(getpass.getpass("PDF password: ")):
+                    raise ValueError("PDF authentication failed")
             for block in blocks:
                 if block.artifact_id != artifact.artifact_id or not block.rendered_image_path:
                     continue
@@ -221,19 +229,15 @@ def _select_pdf_pages(
                 png = page.get_pixmap(matrix=pymupdf.Matrix(2, 2), alpha=False).tobytes("png")
                 if not image_path.is_file() or image_path.read_bytes() != png:
                     raise ValueError("PDF page image does not match the verified original")
-                verified_images[block.block_id] = str(image_path)
+                verified_images[block.block_id] = png
     return FileIntakeResult(
         intake_id=deterministic_id("selected-pdf-intake", {
             "parent": intake.intake_id, "pages": sorted(selected),
         }),
         case_id=intake.case_id,
         files=files,
-        blocks=tuple(
-            block.model_copy(update={"rendered_image_path": verified_images[block.block_id]})
-            if block.block_id in verified_images else block
-            for block in blocks
-        ),
-    )
+        blocks=blocks,
+    ), verified_images
 
 
 def _imaging_observations(review_id, kind, items):
@@ -472,8 +476,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 raise
             intake = None
         selection_payload = {}
+        verified_images = {}
         if args.pdf_page:
-            intake = _select_pdf_pages(intake, args.pdf_page, ContentAddressedStore(root))
+            intake, verified_images = _select_pdf_pages(
+                intake, args.pdf_page, ContentAddressedStore(root),
+                prompt_password=args.pdf_password_prompt,
+            )
             selection_payload["selected_pdf_pages"] = [
                 {"artifact_id": artifact_id, "page": page}
                 for artifact_id, page in sorted({(block.artifact_id, block.page_number)
@@ -487,7 +495,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 2
         gateways = build_live_gateways(registry, backend=estimate.backend)
         service = ClinicalExtractionService(root, gateways, registry)
-        extraction = service.extract(intake, approved_estimate(args, estimate))
+        approved = approved_estimate(args, estimate)
+        if verified_images:
+            with TemporaryDirectory(prefix="medic-verified-pdf-") as directory:
+                verified_image_paths = {}
+                for index, (block_id, png) in enumerate(verified_images.items()):
+                    path = Path(directory) / f"page-{index}.png"
+                    path.write_bytes(png)
+                    verified_image_paths[block_id] = path
+                extraction = service.extract(intake, approved, verified_image_paths=verified_image_paths)
+        else:
+            extraction = service.extract(intake, approved)
         context = _interactive_review(service, extraction)
         output = {
             "case_id": case_id, "extraction_id": extraction.extraction_id,

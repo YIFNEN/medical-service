@@ -100,15 +100,28 @@ class ResearchCliTests(unittest.TestCase):
             reconciliation = {"provider_response_id": "fixture-summary", "facts": [], "uncertainties": []}
             raw = RecordedGateway("openai", "fixture", [independent, independent, reconciliation])
             raw.backend = "codex"
+            source_page = Path(next(block.rendered_image_path for block in intake.blocks
+                                    if block.page_number == 5))
+            source_bytes = source_page.read_bytes()
+            actual_generate = raw.generate_raw
+
+            def generate_with_tampered_cache(**request):
+                source_page.write_bytes(b"changed after page verification")
+                try:
+                    self.assertEqual([path.read_bytes() for path in request["image_paths"]], [source_bytes])
+                    self.assertNotIn(source_page, request["image_paths"])
+                    return actual_generate(**request)
+                finally:
+                    source_page.write_bytes(source_bytes)
+
             with patch("medic.cli.build_live_gateways", return_value={"openai": ApprovedGateway(raw)}), \
-                    patch.object(raw, "generate_raw", wraps=raw.generate_raw) as generate:
+                    patch.object(raw, "generate_raw", side_effect=generate_with_tampered_cache) as generate:
                 approved = args + ["--codex-calls", "3", "--approve-transmission"]
                 code, result = self.invoke(approved)
                 self.assertEqual(code, 0)
                 self.assertEqual(result["selected_pdf_pages"], payload["selected_pdf_pages"])
                 self.assertEqual(self.invoke(approved)[1]["extraction_id"], result["extraction_id"])
                 self.assertEqual(generate.call_count, 3)
-                selected_blocks = [block for block in intake.blocks if block.page_number in {2, 5}]
                 for call in generate.call_args_list[:2]:
                     prompt = call.kwargs["prompt"]
                     self.assertIn(f"{artifact}|pdf_bbox|page:2;", prompt)
@@ -116,10 +129,6 @@ class ResearchCliTests(unittest.TestCase):
                     self.assertNotIn("Page marker 1", prompt)
                     self.assertNotIn("Page marker 3", prompt)
                     self.assertNotIn("Other artifact marker", prompt)
-                    self.assertEqual(call.kwargs["image_paths"], tuple(
-                        Path(block.rendered_image_path) for block in selected_blocks
-                        if block.rendered_image_path
-                    ))
 
             for invalid in (("unknown-artifact", "2"), (artifact, "6"), (artifact, "0")):
                 with self.subTest(invalid=invalid), patch("medic.cli.build_live_gateways") as gateways:
@@ -128,12 +137,33 @@ class ResearchCliTests(unittest.TestCase):
                               "--pdf-page", *invalid, "--codex-calls", "3", "--approve-transmission"])
                     gateways.assert_not_called()
 
-            other_page = next(block for block in intake.blocks if block.page_number == 5)
-            Image.new("RGB", (10, 10)).save(other_page.rendered_image_path)
+            Image.new("RGB", (10, 10)).save(source_page)
             with patch("medic.cli.build_live_gateways") as gateways:
                 with self.assertRaisesRegex(ValueError, "PDF page image does not match"):
                     main(approved)
                 gateways.assert_not_called()
+
+    def test_scoped_review_authenticates_password_protected_pdf_page(self):
+        from medic.intake import FileIntakeService
+        from medic.ledger import ContentAddressedStore
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            pdf = root / "encrypted.pdf"
+            with fitz.open() as document:
+                document.new_page()
+                document.save(pdf, encryption=fitz.PDF_ENCRYPT_AES_256,
+                              owner_pw="fixture-owner", user_pw="fixture-secret")
+            ledger = AppendOnlyJsonlLedger(root / "ledger.jsonl")
+            intake = FileIntakeService(ContentAddressedStore(root), ledger).ingest_files(
+                "case-1", [pdf], password_provider=lambda _: "fixture-secret"
+            )
+            args = ["review", "case-1", "--interactive", "--store", temp,
+                    "--pdf-page", intake.files[0].artifact.artifact_id, "1"]
+            with self.assertRaisesRegex(ValueError, "PDF password required"):
+                self.invoke(args)
+            with patch("medic.cli.getpass.getpass", return_value="fixture-secret"):
+                self.assertEqual(self.invoke(args + ["--pdf-password-prompt"])[0], 2)
 
     def test_scoped_review_rejects_non_pdf_from_legacy_intake(self):
         from medic.intake import FileIntakeService

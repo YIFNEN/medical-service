@@ -374,7 +374,7 @@ $DocumentArgs = @('review', $Case, '--interactive', '--backend', 'codex',
 & $Python -X utf8 -m medic @DocumentArgs
 ```
 
-`selected_pdf_pages`에 표시된 PDF와 페이지가 의도한 선택과 일치하는지 확인한다. 단일 배치의 견적은 호출 3회다. 여러 페이지가 필요하면 `--pdf-page PDF_ID PAGE`를 반복한다. 혼합 페이지에서는 해당 페이지의 텍스트 블록과 저장된 전체 페이지 이미지가 추출 입력에 포함된다. 다른 페이지나 파일은 추출 입력에서 빠진다. 원본 해시와 페이지 번호는 출처 참조에 유지된다.
+`selected_pdf_pages`에 표시된 PDF와 페이지가 의도한 선택과 일치하는지 확인한다. 단일 배치의 견적은 호출 3회다. 여러 페이지가 필요하면 `--pdf-page PDF_ID PAGE`를 반복한다. 암호화된 PDF는 `--pdf-password-prompt`로 로컬에서 암호를 입력한다. 혼합 페이지에서는 해당 페이지의 텍스트 블록과 원본에서 다시 렌더링해 검증한 전체 페이지 이미지가 추출 입력에 포함된다. 다른 페이지나 파일은 추출 입력에서 빠진다. 원본 해시와 페이지 번호는 출처 참조에 유지된다.
 
 선택한 입력과 시도 상한이 승인되면 같은 인수에 `--codex-calls N --approve-transmission --approval-id EXTRACTION_APPROVAL_ID`를 붙인다. 재개에는 같은 선택과 승인 ID를 사용한다. 추출 답변을 받은 후에는 제안 사실별 문구를 원문과 대조하고 불확실한 항목을 보류한다.
 
