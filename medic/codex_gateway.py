@@ -45,7 +45,8 @@ class CodexGateway:
             # advisory because the CLI has no max_output_tokens option.
             stdin = (f'Complete the MEDIC {stage} stage. Use no tools. '
                      f'Aim for at most {max_output_tokens} output tokens.\n\n{prompt}')
-            result = self._run([*command, '-'], cwd=cwd, env=env, input=stdin, timeout=180)
+            timeout = 600 if stage == 'SYNTHESIS_REVIEW_COMPLETED' else 180
+            result = self._run([*command, '-'], cwd=cwd, env=env, input=stdin, timeout=timeout)
             if result.returncode or not reply.is_file():
                 raise RuntimeError('Codex CLI did not produce a completed structured reply; check login and plan usage')
             events = [json.loads(line) for line in result.stdout.splitlines() if line.strip()]

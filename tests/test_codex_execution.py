@@ -63,7 +63,8 @@ def test_codex_image_smoke_checks_attachment_and_rejects_wrong_color(tmp_path, m
 
 
 @pytest.mark.parametrize('unexpected_tool', [False, True])
-def test_codex_cli_command_uses_chatgpt_auth_stdin_and_validates_events(monkeypatch, unexpected_tool):
+@pytest.mark.parametrize('stage, timeout', [('check', 180), ('SYNTHESIS_REVIEW_COMPLETED', 600)])
+def test_codex_cli_command_uses_chatgpt_auth_stdin_and_validates_events(monkeypatch, unexpected_tool, stage, timeout):
     from medic.codex_gateway import CodexGateway
 
     monkeypatch.setenv('OPENAI_API_KEY', 'fixture-key')
@@ -79,6 +80,7 @@ def test_codex_cli_command_uses_chatgpt_auth_stdin_and_validates_events(monkeypa
         assert 'read-only' in command and '--output-schema' in command
         assert not any(prompt in arg for arg in command)
         assert prompt in kwargs['input']
+        assert kwargs['timeout'] == timeout
         Path(command[command.index('--output-last-message') + 1]).write_text(
             '{"echo":"MEDIC_SYNTHETIC_SMOKE","structured":true}', encoding='utf-8')
         events = [{'type': 'thread.started', 'thread_id': 'example-thread'}]
@@ -88,7 +90,7 @@ def test_codex_cli_command_uses_chatgpt_auth_stdin_and_validates_events(monkeypa
         return SimpleNamespace(returncode=0, stdout='\n'.join(map(json.dumps, events)), stderr='')
 
     monkeypatch.setattr('medic.codex_gateway.subprocess.run', run)
-    kwargs = dict(stage='check', prompt=prompt, json_schema=SmokeReply.model_json_schema(),
+    kwargs = dict(stage=stage, prompt=prompt, json_schema=SmokeReply.model_json_schema(),
                   max_output_tokens=100)
     if unexpected_tool:
         with pytest.raises(RuntimeError, match='unexpected tool'):

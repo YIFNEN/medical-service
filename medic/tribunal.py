@@ -248,9 +248,28 @@ class TribunalService:
             calls.append(call)
 
         synthesis_reviews: list[SynthesisReview] = []
+        claims = synthesis_claims(synthesis)
+        claim_ids = {claim["claim_id"] for claim in claims}
+        aliases = {f"C{index:03}": claim["claim_id"] for index, claim in enumerate(claims, 1)}
+
+        def verified_review(review: SynthesisReview) -> SynthesisReview:
+            ids = [audit.claim_id for audit in review.claim_reviews]
+            if len(ids) != len(claim_ids) or set(ids) not in (claim_ids, set(aliases)):
+                raise ValueError("claim review must cover every synthesis claim exactly once")
+            if review.synthesis_id != synthesis.synthesis_id:
+                raise ValueError("synthesis review lineage does not match")
+            if set(ids) == claim_ids:
+                return review
+            return review.model_copy(update={"claim_reviews": tuple(
+                audit.model_copy(update={"claim_id": aliases[audit.claim_id]})
+                for audit in review.claim_reviews
+            )})
+
         for role, provider in self.reviewers.items():
             prompt = self._json_prompt(
                 "Review the proposed synthesis without erasing disagreement. Return exactly one claim_review for every supplied claim ID. "
+                "Copy the short IDs from the claims list exactly, keeping their order. Do not use IDs from the synthesis object. "
+                "Keep each rationale concise. Return empty lists when there are no findings for an optional list. "
                 "Check numbers, direction of effects, population, personal applicability, and invented papers/URLs. "
                 "SUPPORTED requires exact source quotes or patient fact IDs; uncertainty or missing support must be explicit. "
                 "A matching quote is insufficient if it does not entail the claim. Never treat model agreement as truth. "
@@ -261,13 +280,15 @@ class TribunalService:
                 "Global requires_fulltext_verification or required_evidence_fields requires verification for every cited paper. "
                 "Necessary verified passages in PARTIAL_FULL_TEXT can suffice; FULL_TEXT alone is not proof of a claim. "
                 "Localize every error to claim_reviews so the affected claim can be withheld independently.",
-                {"synthesis": synthesis, "claims": synthesis_claims(synthesis), "patient": patient_context,
+                {"synthesis": synthesis, "claims": [
+                    {**claim, "claim_id": alias} for alias, claim in zip(aliases, claims, strict=True)
+                ], "patient": patient_context,
                  "own_revised_opinion": revisions[role], "evidence": evidence_cards},
             )
             review, call = self._stage(
                 ledger, "SYNTHESIS_REVIEW_COMPLETED", role, self.gateways[provider],
                 SynthesisReview, prompt, self.registry.synthesis_review_output_tokens,
-                estimate, gate,
+                estimate, gate, validate_stage=verified_review,
             )
             if review.synthesis_id != synthesis.synthesis_id or review.reviewer_provider != provider:
                 raise ValueError("synthesis review lineage does not match")
@@ -323,17 +344,30 @@ class TribunalService:
     def _stage(
         self, ledger: AppendOnlyJsonlLedger, kind: str, participant: str,
         gateway: ApprovedGateway, output_model: type[T], prompt: str,
-        max_output_tokens: int, estimate: CostEstimate, gate: CitationGate,
+        max_output_tokens: int, estimate: CostEstimate, gate: CitationGate, *, validate_stage=None,
     ) -> tuple[T, ProviderCallRecord | None]:
         key = f"{kind}:{participant}"
-        existing = next(
-            (record for record in ledger.records() if record["kind"] == kind and record["natural_key"] == key),
-            None,
-        )
-        if existing is not None:
+        records = ledger.records()
+        if validate_stage is not None:
+            keys = (f"{key}:verified-claims", key)
+        else:
+            keys = (key,)
+        for saved_key in keys:
+            existing = next((record for record in records if record["kind"] == kind
+                             and record["natural_key"] == saved_key), None)
+            if existing is None:
+                continue
             value = output_model.model_validate_json(
                 json.dumps(existing["payload"]["value"], ensure_ascii=False)
             )
+            if validate_stage is not None:
+                try:
+                    value = validate_stage(value)
+                except ValueError:
+                    if saved_key != key:
+                        raise
+                    key = keys[0]
+                    continue
             call = ProviderCallRecord.model_validate_json(
                 json.dumps(existing["payload"]["call"], ensure_ascii=False)
             )
@@ -343,6 +377,12 @@ class TribunalService:
             prompt = f"Review role {role_id}: {REVIEW_ROLES[role_id][1]}\n{prompt}"
         from .blinding import assert_no_leak
         assert_no_leak(self.root, ledger.path.parent.name, prompt)
+        def validate_response(value):
+            if validate_stage is not None:
+                validate_stage(value)
+            assert_no_leak(self.root, ledger.path.parent.name, value.model_dump_json())
+            self._validate_citations(value, gate)
+
         response = cached_generate(ledger, gateway, scope={"prompt_version": PROMPT_VERSION,
                                    "registry": self.registry.model_dump(mode="json")},
             stage=kind,
@@ -350,6 +390,7 @@ class TribunalService:
             output_model=output_model,
             estimate=estimate,
             max_output_tokens=max_output_tokens,
+            validate_result=validate_response,
         )
         metadata = {"provider": response.provider, "model": response.model,
                     "provider_response_id": response.response_id,
@@ -359,6 +400,8 @@ class TribunalService:
             metadata["opinion_id"] = f"op-{role_id}"
         value = response.value.model_copy(update={key: value for key, value in metadata.items()
                                                  if key in type(response.value).model_fields})
+        if validate_stage is not None:
+            value = validate_stage(value)
         assert_no_leak(self.root, ledger.path.parent.name, value.model_dump_json())
         self._validate_citations(value, gate)
         call = self.registry.call_record(kind, response)
