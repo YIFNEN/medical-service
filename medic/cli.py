@@ -218,6 +218,9 @@ def _select_pdf_pages(
     verified_images: dict[str, bytes] = {}
     for file in files:
         artifact = file.artifact
+        if (artifact.case_id != intake.case_id
+                or artifact.artifact_id != f"artifact-{artifact.content_hash.removeprefix('sha256:')}"):
+            raise ValueError("PDF artifact does not match its case and content hash")
         raw_path = store.read_raw(artifact)
         with pymupdf.open(raw_path) as document:
             if not document.is_pdf:
@@ -243,7 +246,10 @@ def _select_pdf_pages(
                 locator = block.source_locator
                 if (block.text or locator.artifact_id != artifact.artifact_id
                         or locator.locator_type != "pdf_page"
-                        or locator.locator != f"page:{number};whole-page-image"):
+                        or locator.locator != f"page:{number};whole-page-image"
+                        or block.block_id != deterministic_id("intake-block", {
+                            "artifact": artifact.artifact_id, "page": number,
+                        })):
                     raise ValueError("PDF page image does not match the verified original")
                 image_path = Path(block.rendered_image_path)
                 png = page.get_pixmap(matrix=pymupdf.Matrix(2, 2), alpha=False).tobytes("png")
@@ -347,11 +353,17 @@ def _latest_context(ledger: AppendOnlyJsonlLedger, case_id: str) -> dict[str, An
         for fact in context.get("confirmed_facts", []):
             if fact not in represented and fact not in unstructured_facts:
                 unstructured_facts.append(fact)
-        for uncertainty in context.get("uncertainties", []):
-            if uncertainty not in uncertainties:
-                uncertainties.append(uncertainty)
         if context.get("extraction_id"):
             extraction_ids.append(context["extraction_id"])
+            # Reconciliation notes are model output and can restate candidates.
+            if any(value is None for value in context.get("source_decisions", {}).values()):
+                note = "Some document extraction candidates were deferred during source review."
+                if note not in uncertainties:
+                    uncertainties.append(note)
+        else:
+            for uncertainty in context.get("uncertainties", []):
+                if uncertainty not in uncertainties:
+                    uncertainties.append(uncertainty)
     if not found and not imaging_reviews:
         raise KeyError(f"no HIGH_IMPACT_FACTS_CONFIRMED data found for case {case_id}")
     if not found:

@@ -239,6 +239,35 @@ class ResearchCliTests(unittest.TestCase):
                 self.invoke(["review", "case-1", "--interactive", "--store", temp,
                              "--pdf-page", intake.files[0].artifact.artifact_id, "1"])
 
+    def test_scoped_review_rejects_mismatched_content_hash_and_duplicate_image_block_id(self):
+        from medic.cli import _select_pdf_pages
+        from medic.intake import FileIntakeService
+        from medic.ledger import ContentAddressedStore
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            pdf = root / "pages.pdf"
+            with fitz.open() as document:
+                document.new_page()
+                document.new_page()
+                document.save(pdf)
+            store = ContentAddressedStore(root)
+            intake = FileIntakeService(store, AppendOnlyJsonlLedger(root / "ledger.jsonl")).ingest_files(
+                "case-1", [pdf]
+            )
+            file = intake.files[0]
+            artifact_id = file.artifact.artifact_id
+            wrong_artifact = file.artifact.model_copy(update={"content_hash": "sha256:" + "0" * 64})
+            wrong_intake = intake.model_copy(update={"files": (file.model_copy(update={"artifact": wrong_artifact}),)})
+            with self.assertRaisesRegex(ValueError, "PDF artifact does not match"):
+                _select_pdf_pages(wrong_intake, [[artifact_id, "1"]], store)
+            first, second = intake.blocks
+            wrong_intake = intake.model_copy(update={
+                "blocks": (first, second.model_copy(update={"block_id": first.block_id})),
+            })
+            with self.assertRaisesRegex(ValueError, "PDF page image does not match"):
+                _select_pdf_pages(wrong_intake, [[artifact_id, "1"], [artifact_id, "2"]], store)
+
     def test_deliberate_without_approval_only_prints_cost(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -288,12 +317,14 @@ class ResearchCliTests(unittest.TestCase):
             ledger.append_once("HIGH_IMPACT_FACTS_CONFIRMED", "fixture", {
                 "case_id": "case-1", "context": {
                     "confirmed_facts": ["alignment: Verified wording", "alignment: Unreviewed conclusion"],
-                    "fact_details": [confirmed, tentative], "uncertainties": [],
+                    "fact_details": [confirmed, tentative],
+                    "uncertainties": ["Unreviewed conclusion"], "extraction_id": "source-extraction",
                 },
             })
             context = _latest_context(ledger, "case-1")
             self.assertEqual(context["fact_details"], [confirmed])
             self.assertEqual(context["confirmed_facts"], ["alignment: Verified wording"])
+            self.assertNotIn("Unreviewed conclusion", context["uncertainties"])
             self.assertEqual(len(ledger.records()[0]["payload"]["context"]["fact_details"]), 2)
     def test_report_cli_exports_selected_format(self):
         with tempfile.TemporaryDirectory() as temp:
