@@ -8,6 +8,8 @@ from datetime import date
 from pathlib import Path
 from typing import Any, Sequence
 
+import pymupdf
+
 from .ankle import ClinicalAnkleProjector, ReviewBundle
 from .compiler import ClinicalCompiler
 from .config import CostEstimate, ModelRegistry
@@ -21,7 +23,7 @@ from .evidence import (
     PubMedSource,
 )
 from .extraction import ClinicalExtractionService, ExtractionResult, extraction_batches
-from .intake import FileIntakeResult, FileIntakeService, ImageRole
+from .intake import FileIntakeResult, FileIntakeService, ImageRole, InputKind
 from .ledger import AppendOnlyJsonlLedger, ContentAddressedStore, deterministic_id
 from .providers import build_live_gateways
 from .reasoning import ReasoningService, SyntheticReasoner
@@ -70,6 +72,8 @@ def _parser() -> argparse.ArgumentParser:
     review.add_argument("--decisions", type=Path)
     review.add_argument("--compile-id")
     review.add_argument("--interactive", action="store_true")
+    review.add_argument("--pdf-page", action="append", nargs=2, metavar=("ARTIFACT_ID", "PAGE"),
+                        help="limit extraction to these original 1-based PDF pages; repeat to select more")
     review.add_argument("--approve-cost", action="store_true")
     review.add_argument("--input-tokens", type=int, default=10_000)
     review.add_argument("--store", type=Path, required=True)
@@ -179,6 +183,39 @@ def _latest_intake(ledger: AppendOnlyJsonlLedger, case_id: str) -> FileIntakeRes
             "files": [files[key].model_dump(mode="json") for key in sorted(files)],
             "blocks": [block.model_dump(mode="json") for block in all_blocks]}),
         case_id=case_id, files=tuple(files[key] for key in sorted(files)), blocks=all_blocks,
+    )
+
+
+def _select_pdf_pages(
+    intake: FileIntakeResult, requests: list[list[str]], store: ContentAddressedStore,
+) -> FileIntakeResult:
+    pdf_ids = {file.artifact.artifact_id for file in intake.files if file.kind == InputKind.PDF}
+    available = {(block.artifact_id, block.page_number) for block in intake.blocks
+                 if block.artifact_id in pdf_ids}
+    selected = set()
+    for artifact_id, raw_page in requests:
+        try:
+            page = int(raw_page)
+        except ValueError:
+            raise ValueError("PDF page selection requires a positive page number") from None
+        if page < 1 or (artifact_id, page) not in available:
+            raise ValueError("PDF page selection must refer to an ingested PDF page in this case")
+        selected.add((artifact_id, page))
+    selected_pdf_ids = {artifact_id for artifact_id, _ in selected}
+    files = tuple(file for file in intake.files if file.artifact.artifact_id in selected_pdf_ids)
+    for file in files:
+        raw_path = store.read_raw(file.artifact)
+        with pymupdf.open(raw_path) as document:
+            if not document.is_pdf:
+                raise ValueError("PDF page selection requires the original PDF format")
+    return FileIntakeResult(
+        intake_id=deterministic_id("selected-pdf-intake", {
+            "parent": intake.intake_id, "pages": sorted(selected),
+        }),
+        case_id=intake.case_id,
+        files=files,
+        blocks=tuple(block for block in intake.blocks
+                     if (block.artifact_id, block.page_number) in selected),
     )
 
 
@@ -380,6 +417,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             "labels": ["PERSONAL_RESEARCH", "UNTRUSTED_SOURCE_DATA"],
         }
     elif command == "review" and args.decisions:
+        if args.pdf_page:
+            raise ValueError("PDF page selection requires interactive file review")
         case_id = args.case_id or args.case
         if not case_id:
             raise ValueError("review requires CASE or --case-id")
@@ -412,13 +451,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         try:
             intake = _latest_intake(ledger, case_id)
         except KeyError:
-            if execution_requested(args):
+            if execution_requested(args) or args.pdf_page:
                 raise
             intake = None
+        selection_payload = {}
+        if args.pdf_page:
+            intake = _select_pdf_pages(intake, args.pdf_page, ContentAddressedStore(root))
+            selection_payload["selected_pdf_pages"] = [
+                {"artifact_id": artifact_id, "page": page}
+                for artifact_id, page in sorted({(block.artifact_id, block.page_number)
+                                                 for block in intake.blocks})
+            ]
         batch_count = len(extraction_batches(intake)) if intake else 1
         estimate = execution_estimate(args, registry.estimate_extraction_cost(args.input_tokens, batch_count=batch_count))
         if not execution_requested(args):
-            print(json.dumps({**_cost_payload(estimate), "batch_count": batch_count,
+            print(json.dumps({**_cost_payload(estimate), **selection_payload, "batch_count": batch_count,
                               "estimate_scope": "all batches; completed calls reused"}, ensure_ascii=False, sort_keys=True))
             return 2
         gateways = build_live_gateways(registry, backend=estimate.backend)
@@ -427,6 +474,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         context = _interactive_review(service, extraction)
         output = {
             "case_id": case_id, "extraction_id": extraction.extraction_id,
+            **selection_payload,
             "confirmed_fact_count": len(context["confirmed_facts"]),
             "uncertainty_count": len(context["uncertainties"]),
             "labels": ["PERSONAL_RESEARCH", "USER_REVIEWED"],

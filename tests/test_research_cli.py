@@ -6,6 +6,10 @@ import unittest
 from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
+from unittest.mock import patch
+
+import fitz
+from PIL import Image
 
 from medic.cli import main
 from medic.config import ModelRegistry
@@ -60,6 +64,86 @@ class ResearchCliTests(unittest.TestCase):
             self.assertEqual(code, 2)
             self.assertEqual(payload["call_count"], 3)
             self.assertEqual(payload["paid_calls_made"], 0)
+
+    def test_review_selects_only_named_pdf_pages_and_preserves_original_locators(self):
+        from medic.intake import FileIntakeService
+        from medic.ledger import ContentAddressedStore
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            pdf = root / "record.pdf"
+            with fitz.open() as document:
+                for number in range(1, 6):
+                    page = document.new_page()
+                    if number != 5:
+                        page.insert_text((72, 72), f"Page marker {number}")
+                document.save(pdf)
+            unrelated = root / "other.txt"
+            unrelated.write_text("Other artifact marker", encoding="utf-8")
+            ledger = AppendOnlyJsonlLedger(root / "ledger.jsonl")
+            store = ContentAddressedStore(root)
+            intake = FileIntakeService(store, ledger).ingest_files("case-1", [pdf, unrelated])
+            artifact = intake.files[0].artifact.artifact_id
+            args = ["review", "case-1", "--interactive", "--store", temp, "--backend", "codex",
+                    "--pdf-page", artifact, "5", "--pdf-page", artifact, "2"]
+            code, payload = self.invoke(args)
+            self.assertEqual(code, 2)
+            self.assertEqual(payload["call_count"], 3)
+            self.assertEqual(payload["selected_pdf_pages"], [
+                {"artifact_id": artifact, "page": 2}, {"artifact_id": artifact, "page": 5}
+            ])
+
+            from medic.providers import ApprovedGateway, RecordedGateway
+
+            independent = {"provider": "openai", "model": "fixture",
+                           "provider_response_id": "fixture-extraction", "facts": []}
+            reconciliation = {"provider_response_id": "fixture-summary", "facts": [], "uncertainties": []}
+            raw = RecordedGateway("openai", "fixture", [independent, independent, reconciliation])
+            raw.backend = "codex"
+            with patch("medic.cli.build_live_gateways", return_value={"openai": ApprovedGateway(raw)}), \
+                    patch.object(raw, "generate_raw", wraps=raw.generate_raw) as generate:
+                approved = args + ["--codex-calls", "3", "--approve-transmission"]
+                code, result = self.invoke(approved)
+                self.assertEqual(code, 0)
+                self.assertEqual(result["selected_pdf_pages"], payload["selected_pdf_pages"])
+                self.assertEqual(self.invoke(approved)[1]["extraction_id"], result["extraction_id"])
+                self.assertEqual(generate.call_count, 3)
+                selected_blocks = [block for block in intake.blocks if block.page_number in {2, 5}]
+                for call in generate.call_args_list[:2]:
+                    prompt = call.kwargs["prompt"]
+                    self.assertIn(f"{artifact}|pdf_bbox|page:2;", prompt)
+                    self.assertIn("Page marker 2", prompt)
+                    self.assertNotIn("Page marker 1", prompt)
+                    self.assertNotIn("Page marker 3", prompt)
+                    self.assertNotIn("Other artifact marker", prompt)
+                    self.assertEqual(call.kwargs["image_paths"], tuple(
+                        Path(block.rendered_image_path) for block in selected_blocks
+                        if block.rendered_image_path
+                    ))
+
+            for invalid in (("unknown-artifact", "2"), (artifact, "6"), (artifact, "0")):
+                with self.subTest(invalid=invalid), patch("medic.cli.build_live_gateways") as gateways:
+                    with self.assertRaisesRegex(ValueError, "PDF page selection"):
+                        main(["review", "case-1", "--interactive", "--store", temp, "--backend", "codex",
+                              "--pdf-page", *invalid, "--codex-calls", "3", "--approve-transmission"])
+                    gateways.assert_not_called()
+
+    def test_scoped_review_rejects_non_pdf_from_legacy_intake(self):
+        from medic.intake import FileIntakeService
+        from medic.ledger import ContentAddressedStore
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            disguised = root / "non-pdf.pdf"
+            Image.new("RGB", (10, 10)).save(disguised, format="PNG")
+            ledger = AppendOnlyJsonlLedger(root / "ledger.jsonl")
+            intake = FileIntakeService(ContentAddressedStore(root), ledger).ingest_files(
+                "case-1", [disguised]
+            )
+            with self.assertRaisesRegex(ValueError, "original PDF format"):
+                self.invoke(["review", "case-1", "--interactive", "--store", temp,
+                             "--pdf-page", intake.files[0].artifact.artifact_id, "1"])
+
     def test_deliberate_without_approval_only_prints_cost(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

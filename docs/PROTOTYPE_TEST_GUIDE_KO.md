@@ -365,6 +365,19 @@ $ExtractionBudget = [double](Read-Host '별도로 승인한 추출 예산 USD')
 검수는 문서의 기재 내용 확인이며 의학적 사실의 확정이 아니다. 답변은 항목별 저장되어 중단 후 재사용한다.
 원문·검수 다음에 개인 조건/의미/질문을 갱신하고 판단 견적을 재확인한다.
 
+여러 진료 내역을 묶은 PDF에서는 필요한 원본 페이지만 추출할 수 있다. 개인 저장소의 `ledger.jsonl`에서 해당 사례의 `REAL_FILES_INGESTED` 이벤트를 찾아 `payload.intake.files[].artifact.artifact_id`를 확인한다. 페이지 번호는 PDF 첫 페이지를 1로 센다.
+
+```powershell
+$PdfArtifact = 'artifact-REPLACE_WITH_INGESTED_PDF_ID'
+$DocumentArgs = @('review', $Case, '--interactive', '--backend', 'codex',
+  '--pdf-page', $PdfArtifact, '3', '--store', $Store)
+& $Python -X utf8 -m medic @DocumentArgs
+```
+
+`selected_pdf_pages`에 표시된 PDF와 페이지가 의도한 선택과 일치하는지 확인한다. 단일 배치의 견적은 호출 3회다. 여러 페이지가 필요하면 `--pdf-page PDF_ID PAGE`를 반복한다. 혼합 페이지에서는 해당 페이지의 텍스트 블록과 저장된 전체 페이지 이미지가 추출 입력에 포함된다. 다른 페이지나 파일은 추출 입력에서 빠진다. 원본 해시와 페이지 번호는 출처 참조에 유지된다.
+
+선택한 입력과 시도 상한이 승인되면 같은 인수에 `--codex-calls N --approve-transmission --approval-id EXTRACTION_APPROVAL_ID`를 붙인다. 재개에는 같은 선택과 승인 ID를 사용한다. 추출 답변을 받은 후에는 제안 사실별 문구를 원문과 대조하고 불확실한 항목을 보류한다.
+
 ```powershell
 & $Python -X utf8 -m medic deliberate $Case --preset pilot --run-id pilot-001 --store $Store
 $DecisionBudget = [double](Read-Host '별도로 승인한 판단 예산 USD')
