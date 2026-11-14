@@ -50,6 +50,23 @@ class FileIntakeResult(StrictFrozenModel):
     blocks: tuple[IntakeBlock, ...]
 
 
+def pdf_text_blocks(artifact_id: str, page: pymupdf.Page) -> tuple[IntakeBlock, ...]:
+    number = page.number + 1
+    blocks = [block for block in page.get_text("blocks")
+              if len(block) >= 5 and str(block[4]).strip()]
+    output = []
+    for index, (x0, y0, x1, y1, text, *_) in enumerate(blocks):
+        output.append(IntakeBlock(
+            block_id=deterministic_id("intake-block", {"artifact": artifact_id, "page": number, "block": index}),
+            artifact_id=artifact_id, page_number=number, text=str(text).strip(),
+            source_locator=SourceLocator(
+                artifact_id=artifact_id, locator_type="pdf_bbox",
+                locator=f"page:{number};bbox:{x0:.2f},{y0:.2f},{x1:.2f},{y1:.2f}",
+            ),
+        ))
+    return tuple(output)
+
+
 class FileIntakeService:
     SUPPORTED_TEXT = {".txt", ".md", ".markdown"}
     SUPPORTED_IMAGES = {".png", ".jpg", ".jpeg"}
@@ -138,34 +155,9 @@ class FileIntakeService:
                 if not document.authenticate(password_provider(source_path)):
                     raise ValueError("PDF authentication failed")
             for index, page in enumerate(document):
-                text_blocks = [
-                    block for block in page.get_text("blocks")
-                    if len(block) >= 5 and str(block[4]).strip()
-                ]
+                text_blocks = pdf_text_blocks(artifact.artifact_id, page)
                 if text_blocks:
-                    for block_index, block in enumerate(text_blocks):
-                        x0, y0, x1, y1, text = block[:5]
-                        locator = SourceLocator(
-                            artifact_id=artifact.artifact_id,
-                            locator_type="pdf_bbox",
-                            locator=(
-                                f"page:{index + 1};bbox:"
-                                f"{x0:.2f},{y0:.2f},{x1:.2f},{y1:.2f}"
-                            ),
-                        )
-                        output.append(
-                            IntakeBlock(
-                                block_id=deterministic_id(
-                                    "intake-block",
-                                    {"artifact": artifact.artifact_id, "page": index + 1,
-                                     "block": block_index},
-                                ),
-                                artifact_id=artifact.artifact_id,
-                                page_number=index + 1,
-                                text=str(text).strip(),
-                                source_locator=locator,
-                            )
-                        )
+                    output.extend(text_blocks)
                     # A searchable footer does not prove that the scanned body was extracted.
                     if not page.get_image_info():
                         continue

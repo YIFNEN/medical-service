@@ -24,7 +24,7 @@ from .evidence import (
     PubMedSource,
 )
 from .extraction import ClinicalExtractionService, ExtractionResult, extraction_batches
-from .intake import FileIntakeResult, FileIntakeService, ImageRole, InputKind
+from .intake import FileIntakeResult, FileIntakeService, ImageRole, InputKind, pdf_text_blocks
 from .ledger import AppendOnlyJsonlLedger, ContentAddressedStore, deterministic_id
 from .providers import build_live_gateways
 from .reasoning import ReasoningService, SyntheticReasoner
@@ -227,11 +227,25 @@ def _select_pdf_pages(
                     raise ValueError("PDF password required; use --pdf-password-prompt")
                 if not document.authenticate(getpass.getpass("PDF password: ")):
                     raise ValueError("PDF authentication failed")
-            for block in blocks:
-                if block.artifact_id != artifact.artifact_id or not block.rendered_image_path:
+            for _, number in sorted(pair for pair in selected if pair[0] == artifact.artifact_id):
+                page = document[number - 1]
+                page_blocks = tuple(block for block in blocks
+                                    if block.artifact_id == artifact.artifact_id and block.page_number == number)
+                expected_text = pdf_text_blocks(artifact.artifact_id, page)
+                if tuple(block for block in page_blocks if not block.rendered_image_path) != expected_text:
+                    raise ValueError("PDF page text does not match the verified original")
+                images = tuple(block for block in page_blocks if block.rendered_image_path)
+                if len(images) != int(not expected_text or bool(page.get_image_info())):
+                    raise ValueError("PDF page image does not match the verified original")
+                if not images:
                     continue
+                block = images[0]
+                locator = block.source_locator
+                if (block.text or locator.artifact_id != artifact.artifact_id
+                        or locator.locator_type != "pdf_page"
+                        or locator.locator != f"page:{number};whole-page-image"):
+                    raise ValueError("PDF page image does not match the verified original")
                 image_path = Path(block.rendered_image_path)
-                page = document[block.page_number - 1]
                 png = page.get_pixmap(matrix=pymupdf.Matrix(2, 2), alpha=False).tobytes("png")
                 if not image_path.is_file() or image_path.read_bytes() != png:
                     raise ValueError("PDF page image does not match the verified original")
@@ -325,6 +339,8 @@ def _latest_context(ledger: AppendOnlyJsonlLedger, case_id: str) -> dict[str, An
                 "sources": sorted(detail.get("source_locators", [])),
                 "scope": detail.get("scope", {}),
             })
+            if detail.get("confirmation_scope") == "UNREVIEWED_EXTRACTION" or detail.get("user_confirmed") is False:
+                continue
             if key not in key_order:
                 key_order.append(key)
             facts_by_key[key] = detail
@@ -502,7 +518,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         gateways = build_live_gateways(registry, backend=estimate.backend)
         service = ClinicalExtractionService(root, gateways, registry)
         approved = approved_estimate(args, estimate)
-        if verified_images:
+        if args.pdf_page:
             with TemporaryDirectory(prefix="medic-verified-pdf-") as directory:
                 verified_image_paths = {}
                 for index, (block_id, png) in enumerate(verified_images.items()):

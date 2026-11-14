@@ -11,7 +11,7 @@ from .config import CostEstimate, ModelRegistry
 from .call_cache import cached_generate
 from .extraction_batches import extraction_batches
 from .intake import FileIntakeResult, ImageRole, IntakeBlock
-from .ledger import AppendOnlyJsonlLedger, deterministic_id
+from .ledger import AppendOnlyJsonlLedger, deterministic_id, sha256_digest
 from .providers import ApprovedGateway
 from .research_contracts import FactScope, ProviderCallRecord, StrictFrozenModel
 
@@ -124,7 +124,7 @@ class ClinicalExtractionService:
     ) -> ExtractionResult:
         if not estimate.approved:
             raise PermissionError("explicit cost approval is required before document extraction")
-        results = tuple(self._extract_batch(batch, estimate, verified_image_paths or {})
+        results = tuple(self._extract_batch(batch, estimate, verified_image_paths)
                         for batch in extraction_batches(intake))
         result = ExtractionResult(
             extraction_id=deterministic_id("clinical-extraction-v2", {
@@ -146,7 +146,7 @@ class ClinicalExtractionService:
         return result
 
     def _extract_batch(
-        self, intake: FileIntakeResult, estimate: CostEstimate, verified_image_paths: dict[str, Path],
+        self, intake: FileIntakeResult, estimate: CostEstimate, verified_image_paths: dict[str, Path] | None,
     ) -> ExtractionResult:
         ledger = AppendOnlyJsonlLedger(self.root / "ledger.jsonl")
         cache_key = deterministic_id("extraction-v2", {
@@ -156,8 +156,19 @@ class ClinicalExtractionService:
             "fact_schema": ClinicalFactBatch.model_json_schema(),
             "reconciliation_schema": FactReconciliation.model_json_schema(),
         })
+        image_paths = tuple(
+            (verified_image_paths[block.block_id] if verified_image_paths is not None
+             else Path(block.rendered_image_path))
+            for block in intake.blocks if block.rendered_image_path
+        )
+        batch_cache_key = cache_key if verified_image_paths is None else deterministic_id(
+            "verified-extraction-batch", {
+                "extraction": cache_key,
+                "images": [sha256_digest(path.read_bytes()) for path in image_paths],
+            },
+        )
         for record in reversed(ledger.records()):
-            if record["kind"] != "EXTRACTION_BATCH_COMPLETED" or record["natural_key"] != cache_key:
+            if record["kind"] != "EXTRACTION_BATCH_COMPLETED" or record["natural_key"] != batch_cache_key:
                 continue
             cached = record["payload"].get("extraction", {})
             if cached.get("intake_id") == intake.intake_id:
@@ -214,11 +225,6 @@ class ClinicalExtractionService:
             "REFERENCE_IMAGE_SCREENSHOT content is reference-only: DICOM measurement is forbidden, and no precise radiology interpretation may be claimed. "
             f"High-impact keys include: {', '.join(HIGH_IMPACT_FACT_KEYS)}.\n"
             "UNTRUSTED SOURCE JSON:\n" + json.dumps(source_payload, ensure_ascii=False, sort_keys=True)
-        )
-        image_paths = tuple(
-            verified_image_paths.get(block.block_id, Path(block.rendered_image_path))
-            for block in intake.blocks
-            if block.rendered_image_path
         )
         batches: list[ClinicalFactBatch] = []
         calls: list[ProviderCallRecord] = []
@@ -306,7 +312,7 @@ class ClinicalExtractionService:
         )
         ledger.append_once(
             "EXTRACTION_BATCH_COMPLETED",
-            cache_key,
+            batch_cache_key,
             {"extraction": result.model_dump(mode="json")},
         )
         return result

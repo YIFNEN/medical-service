@@ -142,6 +142,54 @@ class ResearchCliTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "PDF page image does not match"):
                     main(approved)
                 gateways.assert_not_called()
+            source_page.write_bytes(source_bytes)
+            blocks = tuple(block.model_copy(update={"text": "Unrelated altered text"})
+                           if block.page_number == 2 else block for block in intake.blocks)
+            corrupted = intake.model_copy(update={"blocks": blocks})
+            ledger.append_once("REAL_FILES_INGESTED", "altered-intake",
+                               {"intake": corrupted.model_dump(mode="json")})
+            with patch("medic.cli.build_live_gateways") as gateways:
+                with self.assertRaisesRegex(ValueError, "PDF page text does not match"):
+                    main(approved)
+                gateways.assert_not_called()
+
+    def test_scoped_review_does_not_reuse_batch_for_replaced_unscoped_image(self):
+        from medic.cli import _latest_intake, _select_pdf_pages
+        from medic.extraction import extraction_batches
+        from medic.intake import FileIntakeService
+        from medic.ledger import ContentAddressedStore
+        from medic.providers import ApprovedGateway, RecordedGateway
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            pdf = root / "scan.pdf"
+            with fitz.open() as document:
+                document.new_page()
+                document.save(pdf)
+            ledger = AppendOnlyJsonlLedger(root / "ledger.jsonl")
+            intake = FileIntakeService(ContentAddressedStore(root), ledger).ingest_files("case-1", [pdf])
+            page_path = Path(intake.blocks[0].rendered_image_path)
+            genuine = page_path.read_bytes()
+            Image.new("RGB", (10, 10)).save(page_path)
+            independent = {"provider": "openai", "model": "fixture", "provider_response_id": "reply", "facts": []}
+            reconciled = {"provider_response_id": "summary", "facts": [], "uncertainties": []}
+            raw = RecordedGateway("openai", "fixture", [independent, independent, reconciled] * 2)
+            raw.backend = "codex"
+            args = ["review", "case-1", "--interactive", "--store", str(root),
+                    "--backend", "codex", "--codex-calls", "3", "--approve-transmission"]
+            with patch("medic.cli.build_live_gateways", return_value={"openai": ApprovedGateway(raw)}):
+                self.assertEqual(self.invoke(args + ["--approval-id", "unscoped"])[0], 0)
+                page_path.write_bytes(genuine)
+                original = _latest_intake(ledger, "case-1")
+                selected, _ = _select_pdf_pages(original, [[intake.files[0].artifact.artifact_id, "1"]],
+                                                ContentAddressedStore(root))
+                self.assertEqual(extraction_batches(selected)[0].intake_id,
+                                 extraction_batches(original)[0].intake_id)
+                scoped = args + ["--pdf-page", intake.files[0].artifact.artifact_id, "1",
+                                 "--approval-id", "scoped"]
+                self.assertEqual(self.invoke(scoped)[0], 0)
+                self.assertEqual(self.invoke(scoped)[0], 0)
+            self.assertEqual(raw.call_count, 6)
 
     def test_scoped_review_authenticates_password_protected_pdf_page(self):
         from medic.cli import _select_pdf_pages
@@ -226,6 +274,27 @@ class ResearchCliTests(unittest.TestCase):
             context = _latest_context(ledger, "case-1")
             self.assertEqual(context["confirmed_facts"], ["surgery: ORIF", "union: PROGRESSING"])
             self.assertEqual(context["uncertainties"], ["alignment pending"])
+
+    def test_unreviewed_extraction_does_not_enter_model_context(self):
+        from medic.cli import _latest_context
+
+        with tempfile.TemporaryDirectory() as temp:
+            ledger = AppendOnlyJsonlLedger(Path(temp) / "ledger.jsonl")
+            confirmed = {"fact_id": "confirmed", "fact_key": "alignment", "value": "Verified wording",
+                         "source_locators": ["artifact|pdf_bbox|page:1"], "user_confirmed": True,
+                         "confirmation_scope": "SOURCE_TRANSCRIPTION_ONLY"}
+            tentative = {**confirmed, "fact_id": "candidate", "value": "Unreviewed conclusion",
+                         "user_confirmed": False, "confirmation_scope": "UNREVIEWED_EXTRACTION"}
+            ledger.append_once("HIGH_IMPACT_FACTS_CONFIRMED", "fixture", {
+                "case_id": "case-1", "context": {
+                    "confirmed_facts": ["alignment: Verified wording", "alignment: Unreviewed conclusion"],
+                    "fact_details": [confirmed, tentative], "uncertainties": [],
+                },
+            })
+            context = _latest_context(ledger, "case-1")
+            self.assertEqual(context["fact_details"], [confirmed])
+            self.assertEqual(context["confirmed_facts"], ["alignment: Verified wording"])
+            self.assertEqual(len(ledger.records()[0]["payload"]["context"]["fact_details"]), 2)
     def test_report_cli_exports_selected_format(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
