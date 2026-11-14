@@ -206,8 +206,15 @@ def _select_pdf_pages(
         selected.add((artifact_id, page))
     selected_pdf_ids = {artifact_id for artifact_id, _ in selected}
     files = tuple(file for file in intake.files if file.artifact.artifact_id in selected_pdf_ids)
+    derived_root = store.root.resolve() / "derived" / "intake"
     blocks = tuple(block for block in intake.blocks
                    if (block.artifact_id, block.page_number) in selected)
+    blocks = tuple(
+        block.model_copy(update={"rendered_image_path": str(
+            derived_root / block.artifact_id / f"page-{block.page_number}.png"
+        )}) if block.rendered_image_path else block
+        for block in blocks
+    )
     verified_images: dict[str, bytes] = {}
     for file in files:
         artifact = file.artifact
@@ -223,8 +230,7 @@ def _select_pdf_pages(
             for block in blocks:
                 if block.artifact_id != artifact.artifact_id or not block.rendered_image_path:
                     continue
-                image_path = (store.root.resolve() / "derived" / "intake" / artifact.artifact_id
-                              / f"page-{block.page_number}.png")
+                image_path = Path(block.rendered_image_path)
                 page = document[block.page_number - 1]
                 png = page.get_pixmap(matrix=pymupdf.Matrix(2, 2), alpha=False).tobytes("png")
                 if not image_path.is_file() or image_path.read_bytes() != png:

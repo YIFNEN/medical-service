@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import chdir, redirect_stdout
 from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
@@ -144,6 +144,7 @@ class ResearchCliTests(unittest.TestCase):
                 gateways.assert_not_called()
 
     def test_scoped_review_authenticates_password_protected_pdf_page(self):
+        from medic.cli import _select_pdf_pages
         from medic.intake import FileIntakeService
         from medic.ledger import ContentAddressedStore
 
@@ -154,12 +155,21 @@ class ResearchCliTests(unittest.TestCase):
                 document.new_page()
                 document.save(pdf, encryption=fitz.PDF_ENCRYPT_AES_256,
                               owner_pw="fixture-owner", user_pw="fixture-secret")
-            ledger = AppendOnlyJsonlLedger(root / "ledger.jsonl")
-            intake = FileIntakeService(ContentAddressedStore(root), ledger).ingest_files(
-                "case-1", [pdf], password_provider=lambda _: "fixture-secret"
-            )
-            args = ["review", "case-1", "--interactive", "--store", temp,
-                    "--pdf-page", intake.files[0].artifact.artifact_id, "1"]
+            with chdir(root):
+                store = ContentAddressedStore(Path("relative-store"))
+                ledger = AppendOnlyJsonlLedger(store.root / "ledger.jsonl")
+                intake = FileIntakeService(store, ledger).ingest_files(
+                    "case-1", [pdf], password_provider=lambda _: "fixture-secret"
+                )
+                artifact = intake.files[0].artifact.artifact_id
+                with patch("medic.cli.getpass.getpass", return_value="fixture-secret"):
+                    selected, images = _select_pdf_pages(intake, [[artifact, "1"]], store,
+                                                         prompt_password=True)
+                self.assertEqual(Path(selected.blocks[0].rendered_image_path),
+                                 Path(intake.blocks[0].rendered_image_path).resolve())
+                self.assertEqual(len(images), 1)
+            args = ["review", "case-1", "--interactive", "--store", str(root / "relative-store"),
+                    "--pdf-page", artifact, "1"]
             with self.assertRaisesRegex(ValueError, "PDF password required"):
                 self.invoke(args)
             with patch("medic.cli.getpass.getpass", return_value="fixture-secret"):
