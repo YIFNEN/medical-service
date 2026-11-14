@@ -80,6 +80,9 @@ def test_openai_roles_workflow_and_seal(tmp_path, backend):
     for role, prompt in zip(roles, raw.prompts[5:8]):
         assert role in prompt.splitlines()[0]
         assert not any(op.opinion_id in prompt for op in result.opinions)
+    synthesis_prompt = next(prompt for prompt in raw.prompts if "Propose agreements" in prompt)
+    assert "copy each conditional_actions action verbatim into conditional_action_ranking" in synthesis_prompt
+    assert "same order" in synthesis_prompt
     assert run.workflow.run(**run.args) == result
     assert raw.call_count == 18
     duplicated = result.model_copy(update={'synthesis_reviews': (

@@ -222,6 +222,9 @@ class TribunalService:
         from .questions import QuestionClaim
         synthesis_prompt = self._json_prompt(
             "Propose agreements, disagreements, conditional action ranking, and decision-changing information. Preserve dissent. "
+            "Write the structured conditional_actions first, with contiguous ranks starting at 1. Then "
+            "copy each conditional_actions action verbatim into conditional_action_ranking in the same order. "
+            "Both lists must contain identical action strings and have the same length. "
             "If scoped_questions are supplied, return question_claims conforming to question_claim_schema, at least one per question. "
             "Use only each question's allowed IDs. Record MISSING_DATA or SYSTEM_FAILURE separately. "
             "Link every conditional_actions question_id to its own answering supporting claim. "
