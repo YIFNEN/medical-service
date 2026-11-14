@@ -89,7 +89,10 @@ def test_openai_roles_workflow_and_seal(tmp_path, backend):
         result.synthesis_reviews[0], result.synthesis_reviews[0], result.synthesis_reviews[2])})
     with pytest.raises(ValueError, match='incomplete'):
         seal_result(tmp_path, duplicated)
-    _render_completed(tmp_path, result)
+    paths = _render_completed(tmp_path, result)
+    first_render = {key: path.read_bytes() for key, path in paths.items()}
+    assert main(['resume', result.run_id, '--store', str(tmp_path)]) == 0
+    assert {key: path.read_bytes() for key, path in paths.items()} == first_render
     assert comparison_input(tmp_path, result.run_id)['run_id'] == result.run_id
     report = ReportRenderer.markdown(ReportRenderer.build(result))
     assert '반증·대안 검토' in report

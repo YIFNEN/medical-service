@@ -396,6 +396,11 @@ def _interactive_review(service: ClinicalExtractionService, extraction: Extracti
 
 
 def _render_completed(root: Path, result: TribunalResult, output: Path | None = None):
+    # Render the same canonical snapshot on the first completion and on resume.
+    saved = TribunalService.load(root, result.run_id)
+    if saved != result:
+        raise ValueError("report input differs from the pinned result snapshot")
+    result = saved
     if result.patient_context.get('analysis_input', {}).get('mode') == 'CLINICIAN_BLIND':
         from .blinding import seal_result
         seal_result(root, result)
