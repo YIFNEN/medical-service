@@ -166,6 +166,15 @@ class ContentAddressedStore:
             raise RuntimeError(f"immutable raw artifact is missing or corrupt: {artifact.artifact_id}")
         return path
 
+    def read_registered_raw(self, artifact: RawArtifact, *, case_id: str) -> Path:
+        digest = artifact.content_hash.removeprefix("sha256:")
+        if artifact.case_id != case_id or artifact.artifact_id != f"artifact-{digest}":
+            raise ValueError("PDF artifact does not match its case and content hash")
+        metadata = self.metadata_root / f"{artifact.artifact_id}.json"
+        if not metadata.is_file() or RawArtifact.model_validate_json(metadata.read_bytes()) != artifact:
+            raise ValueError("PDF artifact does not match its registered case and metadata")
+        return self.read_raw(artifact)
+
     def save_compiled(self, compile_id: str, payload: dict[str, Any]) -> None:
         target = self.compiled_path(compile_id)
         manifest_bytes = canonical_json_bytes(payload)

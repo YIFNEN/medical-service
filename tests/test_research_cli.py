@@ -261,6 +261,13 @@ class ResearchCliTests(unittest.TestCase):
             wrong_intake = intake.model_copy(update={"files": (file.model_copy(update={"artifact": wrong_artifact}),)})
             with self.assertRaisesRegex(ValueError, "PDF artifact does not match"):
                 _select_pdf_pages(wrong_intake, [[artifact_id, "1"]], store)
+            relabeled_artifact = file.artifact.model_copy(update={"case_id": "another-case"})
+            relabeled = intake.model_copy(update={
+                "case_id": "another-case",
+                "files": (file.model_copy(update={"artifact": relabeled_artifact}),),
+            })
+            with self.assertRaisesRegex(ValueError, "PDF artifact does not match"):
+                _select_pdf_pages(relabeled, [[artifact_id, "1"]], store)
             first, second = intake.blocks
             wrong_intake = intake.model_copy(update={
                 "blocks": (first, second.model_copy(update={"block_id": first.block_id})),

@@ -218,10 +218,7 @@ def _select_pdf_pages(
     verified_images: dict[str, bytes] = {}
     for file in files:
         artifact = file.artifact
-        if (artifact.case_id != intake.case_id
-                or artifact.artifact_id != f"artifact-{artifact.content_hash.removeprefix('sha256:')}"):
-            raise ValueError("PDF artifact does not match its case and content hash")
-        raw_path = store.read_raw(artifact)
+        raw_path = store.read_registered_raw(artifact, case_id=intake.case_id)
         with pymupdf.open(raw_path) as document:
             if not document.is_pdf:
                 raise ValueError("PDF page selection requires the original PDF format")
