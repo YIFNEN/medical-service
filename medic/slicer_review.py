@@ -154,12 +154,12 @@ def import_review(review, manifest, *, review_dir=None):
                 segments.append(dict(sha256=item['sha256'], label=int(label),
                     structure=item.get('structure', 'UNASSIGNED_REQUIRES_REVIEW'),
                     metrics=lesion_metrics(data == label, s['geometry'], roi)))
-    source_instances = [i for i in manifest['instances'] if i['sha256'] in s['original_hashes']]
     return dict(version=1, study_uid=s['study_uid'], series_uid=s['series_uid'],
                 original_hashes=s['original_hashes'], measurements=measurements, segmentations=segments,
                 conditions={'weight_bearing': s.get('weight_bearing', 'UNKNOWN'),
                             'modality': sorted({i.get('modality', 'UNKNOWN') for i in source_instances}),
                             'laterality': sorted({i.get('laterality', 'UNKNOWN') for i in source_instances}),
                             'dates': sorted({i['date'] for i in source_instances if i.get('date')}),
+                            **({'source_date_missing': True} if any(not i.get('date') for i in source_instances) else {}),
                             'geometry': s['geometry']},
                 interpretation='MANUAL_LOCAL_ANNOTATIONS_NOT_DIAGNOSIS', unmarked_tissue='NOT_EVALUATED')

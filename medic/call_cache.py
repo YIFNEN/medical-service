@@ -10,9 +10,12 @@ from .config import ModelRegistry
 
 def cached_generate(ledger, gateway, *, scope, validate_result=None, **kwargs):
     """Persist each successful paid boundary before starting the next call."""
+    check_blind = None
     if ledger.path.parent.parent.name == 'runs':
-        from .blinding import assert_no_leak
-        assert_no_leak(ledger.path.parent.parent.parent, ledger.path.parent.name, kwargs['prompt'])
+        from .blinding import blind_leak_check
+        check_blind = blind_leak_check(ledger.path.parent.parent.parent, ledger.path.parent.name)
+    if check_blind is not None:
+        check_blind(kwargs['prompt'])
     schema = kwargs["output_model"]
     estimate = kwargs['estimate']
     backend = gateway.backend
@@ -31,6 +34,8 @@ def cached_generate(ledger, gateway, *, scope, validate_result=None, **kwargs):
         if existing:
             payload = existing["payload"]
             value = schema.model_validate_json(json.dumps(payload["value"]))
+            if check_blind is not None:
+                check_blind(value.model_dump_json())
             if validate_result:
                 validate_result(value)
             return GatewayResult(value=value, **payload["metadata"])
@@ -64,6 +69,8 @@ def cached_generate(ledger, gateway, *, scope, validate_result=None, **kwargs):
             budget.reserve(attempt, bound)
         # No hidden retries: failures keep their reservation. Resume is explicit.
         result = gateway.generate(**kwargs, _budget_reserved=budget is not None or backend == 'codex')
+        if check_blind is not None:
+            check_blind(result.value.model_dump_json())
         if validate_result:
             validate_result(result.value)
         ledger.append_once("PROVIDER_CALL_COMPLETED", key, {

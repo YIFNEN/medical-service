@@ -175,6 +175,24 @@ def test_visibility_change_recomputes_readiness_in_every_patient_prompt_and_repo
         assert patient['question_evaluations'] == expected
 
 
+def test_explicit_opt_out_keeps_active_case_questions_local(tmp_path):
+    context = source_context()
+    context['typed_questions'][1]['text'] = HIDDEN
+    questions = QuestionSet.for_comprehensive_review('case-1', 'What do the reviewed observations establish?')
+    approval = {**blind_fixtures.approval(), 'include_case_questions': False}
+
+    visible = create_blind_input(tmp_path, 'blind', 'case-1', context,
+                                 questions.model_dump(mode='json'), approval)
+
+    assert not {'typed_questions', 'question_evaluations', 'question_version'}.intersection(visible)
+    snapshot = next(r['payload'] for r in AppendOnlyJsonlLedger(tmp_path / 'runs/blind/ledger.jsonl').records()
+                    if r['kind'] == 'BLIND_INPUT_CREATED')
+    assert snapshot['questions']['custom_question'] == questions.custom_question
+    hidden_file = tmp_path / 'withheld-inputs' / (snapshot['withheld_sha256'].removeprefix('sha256:') + '.json')
+    withheld = json.loads(hidden_file.read_bytes())
+    assert withheld['source_context'] == context
+
+
 @pytest.mark.parametrize('phrase', [HIDDEN, KOREAN, '의료진의 "가려진" 장기 예후 판단입니다',
                                   '의료진의\n가려진\t장기 예후 판단입니다'])
 @pytest.mark.parametrize('surface', ['question', 'nested-metadata'])
@@ -246,7 +264,7 @@ def test_deep_json_escape_chain_fails_closed_before_first_provider(tmp_path, lay
                    for r in run.ledger.records())
 
 
-@pytest.mark.parametrize('surface,expected_calls', [('query', 3), ('issue', 4),
+@pytest.mark.parametrize('surface,expected_calls', [('query', 1), ('issue', 4),
                                                    ('search-metadata', 5), ('opinion', 6)])
 def test_contamination_is_stopped_before_next_external_boundary(tmp_path, surface, expected_calls):
     context = source_context()
@@ -270,6 +288,38 @@ def test_contamination_is_stopped_before_next_external_boundary(tmp_path, surfac
     assert not any(r['kind'] in ('TRIBUNAL_COMPLETED', 'BLIND_RESULT_SEALED')
                    for r in run.ledger.records())
     assert not (tmp_path / 'reports').exists()
+
+
+def test_rejects_withheld_content_in_search_planning_response_before_caching(tmp_path):
+    run = pipeline(tmp_path)
+    run.raw['openai']._responses[0]['picots']['population'] = HIDDEN
+
+    with pytest.raises(ResearchRunFailed) as failure:
+        run.workflow.run(**run.args)
+
+    assert 'withheld' in str(failure.value.__cause__)
+    assert len(prompts(run)) == 1
+    assert not run.source.queries
+    assert not any(r['kind'] == 'PROVIDER_CALL_COMPLETED' for r in run.ledger.records())
+
+
+def test_rejects_withheld_content_in_previously_cached_search_planning_response(tmp_path, monkeypatch):
+    run = pipeline(tmp_path)
+    run.raw['openai']._responses[0]['picots']['population'] = HIDDEN
+    # Simulate a response cached before validation applied to planning outputs.
+    with monkeypatch.context() as previous_version:
+        previous_version.setattr('medic.blinding._check_hidden', lambda *args: None)
+        with pytest.raises(ResearchRunFailed) as paused:
+            run.workflow.run(**{**run.args, 'search_approved': False})
+        assert isinstance(paused.value.__cause__, PermissionError)
+    before = len(prompts(run))
+
+    with pytest.raises(ResearchRunFailed) as failure:
+        run.workflow.run(**run.args)
+
+    assert 'withheld' in str(failure.value.__cause__)
+    assert len(prompts(run)) == before
+    assert not run.source.queries
 
 
 @pytest.mark.parametrize('surface', ['case-mismatch', 'provider-metadata'])

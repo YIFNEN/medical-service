@@ -1,4 +1,5 @@
 """Explicit pairing of reviewed scalar measurements, never scanner coordinates."""
+from datetime import datetime
 import math
 
 
@@ -37,6 +38,20 @@ def _unknown(value):
     return value is None
 
 
+def _source_date(measurement):
+    conditions = measurement.get('source_conditions', {})
+    dates = conditions.get('dates', ())
+    if conditions.get('source_date_missing') or not isinstance(dates, (list, tuple)) or len(dates) != 1:
+        return None
+    value = dates[0]
+    if not isinstance(value, str) or len(value) != 8 or not value.isascii() or not value.isdigit():
+        return None
+    try:
+        return datetime.strptime(value, '%Y%m%d').date()
+    except ValueError:
+        return None
+
+
 def compare_measurements(before, after, *, repeatability_bound=None, repeatability_source=None):
     for measurement in (before, after):
         if 'source_conditions' in measurement:
@@ -47,6 +62,13 @@ def compare_measurements(before, after, *, repeatability_bound=None, repeatabili
            or not math.isfinite(item['value']) for item in (before, after)):
         raise ValueError('finite scalar measurements required')
     mismatch, missing = [], []
+    before_date, after_date = _source_date(before), _source_date(after)
+    if before_date is None or after_date is None:
+        missing.append('source date (requires one valid DICOM date per review)')
+    elif before_date == after_date:
+        mismatch.append('source date: both reviews are from the same date')
+    elif before_date > after_date:
+        mismatch.append('source date: before date is later than after date')
     before_plane, after_plane = before.get('plane'), after.get('plane')
     if (before_plane is None) != (after_plane is None):
         mismatch.append('calculation_plane: 3D versus projected')

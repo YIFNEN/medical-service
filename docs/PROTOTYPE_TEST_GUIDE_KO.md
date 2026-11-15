@@ -209,16 +209,26 @@ print(review_path)
 
 `metadata`는 검수한 JSON을 `json.loads`로 읽은 dict다. UNKNOWN 촬영 조건을 추측으로 채우지 않는다.
 다른 시리즈에 연결된 노드나 연결하지 않은 노드는 거부한다. 장면의 모든 기준점을 일괄 내보내지 않는다.
-내보낸 review.json 경로로:
+가져오기 전에 검수자가 사례와 시리즈의 연결을 확인하고 같은 저장소의 `dicom inspect` 결과를 등록한다.
+이미 다른 사례에 연결된 검사와 검사 원본 일부가 겹치면 등록을 거부한다.
+이전 가져오기 이력도 연결 검사에 사용한다. 기존 사례의 새 계측을 가져오려면 먼저 시리즈를 등록한다.
 
 ```powershell
+$Reviewer = Read-Host '로컬 검수자 별칭'
+$LinkReason = Read-Host '사례와 촬영 시리즈를 연결한 확인 근거'
+& $Python -X utf8 -m medic dicom bind-series --manifest $Inspection.path --series $Series.series_uid `
+  --case $Case --reviewer $Reviewer --reason $LinkReason --store $Store
 $ReviewPath = Read-Host 'Slicer가 출력한 review.json 절대 경로'
-& $Python -X utf8 -m medic dicom import-review --manifest $Inspection.path --review $ReviewPath --case $Case --reviewer local-user --store $Store
+& $Python -X utf8 -m medic dicom import-review --manifest $Inspection.path --review $ReviewPath `
+  --case $Case --reviewer $Reviewer --store $Store
 ```
 
-원본 해시·시리즈·좌표·단위·기하를 검증하고 review ID를 반환한다. USER_REVIEWED는 전문가 인증이 아니다.
+연결에서 `USER_REVIEWED_SOURCE_BINDING`과 `binding_id`, 가져오기에서 같은 `source_binding_id`와 새 `review_id`를 확인한다.
+원본 해시·검사 manifest·시리즈·좌표·단위·기하를 확인한다. `USER_REVIEWED`는 사용자가 선언한 검수 상태다.
 수정은 `--replaces-review-id OLD_ID --amendment-reason '수정 이유'`, 철회는
 `dicom withdraw-review --case CASE --review-id ID --reviewer USER --reason TEXT --store STORE`를 사용한다.
+수정은 실제 수정된 기준점이나 메타데이터를 재검수한 뒤 가져온다. 이후 활성 검수에는 새 ID만 표시되어야 한다.
+최신 검수를 철회하면 해당 계측이 활성 입력에서 빠져야 한다. 원본과 이전 보고서 및 검수 이력의 해시는 보존한다.
 
 ## 7. 두 시점 수동 지표 비교
 
@@ -228,7 +238,8 @@ $ReviewPath = Read-Host 'Slicer가 출력한 review.json 절대 경로'
 
 두 review ID는 import 출력, measurement ID는 해당 review JSON에서 읽는다. 예시 토큰을 실제 ID로 바꾼다.
 결과는 `imaging/comparisons/<hash>.json`. COMPARABLE에서만 scalar 차이를 계산하며 검사 좌표를 직접 빼지 않는다.
-좌우·방법·단위·epoch·촬영 조건이 다르면 INCOMPATIBLE, UNKNOWN이면 LIMITED_UNKNOWN.
+좌우·방법·단위·epoch·촬영 조건이 다르거나 촬영일이 동일·역순이면 `INCOMPATIBLE`이다.
+촬영일 또는 비교에 필요한 조건을 확정할 수 없으면 `LIMITED_UNKNOWN`으로 차이 계산을 보류한다.
 반복측정 오차가 검수되면 `--repeatability-bound 값 --repeatability-source 출처`를 함께 지정한다.
 오차 이내는 안정의 증명이 아니며 clinical_change는 NOT_ESTABLISHED다. 실제 두 시점 자료가 없으면 미검증으로 기록한다.
 
@@ -395,6 +406,9 @@ $DecisionBudget = [double](Read-Host '별도로 승인한 판단 예산 USD')
 ## 9. 의견 가림·봉인·사후 비교
 
 입력 분류를 완료하고 blind-review.json의 질문·개인 조건 항목·영상 review ID를 실제 검수한 값으로 설정한다.
+기존 사례 질문이 판독문이나 가림 대상 사실을 참조하면 가림 승인 JSON에 `"include_case_questions": false`를 설정하고,
+별도로 검수한 중립 질문을 `--question`으로 전달한다. `questions_reviewed`를 `true`로 설정하기 전에 질문과 계측의 자유 입력 메타데이터까지 검토한다.
+기존 사례 질문과 완료 보고서는 보존된다. 철회되거나 현재 검수 목록에 없는 영상 review ID는 실행 전에 거부한다.
 기관 제약·의료진 권고·전언·과거 AI 결론을 본인 경험이나 관찰로 재분류하지 않는다.
 
 ```powershell
@@ -450,6 +464,8 @@ AGREEMENT/CONFLICT/ASSUMPTION_DIFFERENCE/TIME_DIFFERENCE/INSUFFICIENT_EVIDENCE�
 `same_search_snapshot: true`가 같은 검색 후보를 뜻한다. 선별·전문 검토·판단은 각 실행에서 수행한다. 주장별 원문 뒷받침, 숫자·단위·분모, 개인 적용성은 별도로 검수한다. 보고서가 달라진 사실만으로 개선으로 기록하지 않는다.
 
 문서 추출의 출처 위치, 문헌 선별의 후보·쟁점 ID, 전문 검토의 원문 인용 위치가 검증을 통과해야 완료 응답이 저장된다. 실패한 Codex 시도도 승인 상한에 포함된다. 남은 시도가 있으면 같은 입력·설정으로 재개하고, 유효했던 단계의 응답이 재사용되는지 확인한다. 문서 추출은 기존 `review --interactive` 명령을 같은 승인 ID로 다시 실행하고, 종합 판단은 `resume`으로 이어간다.
+검수 자료가 수정·철회된 뒤 미완료 실행을 재개하면 승인 당시 사례 입력과 달라졌는지 확인하고,
+달라졌다면 새 입력을 검수해 새 실행을 만든다. 완료 실행의 재개는 저장된 결과에서 보고서를 다시 만들며 외부 호출은 0회다.
 
 | 상황 | 다음 행동·합격 기준 |
 |---|---|

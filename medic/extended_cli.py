@@ -113,6 +113,13 @@ def register(subparsers):
     export.add_argument('--manifest', type=Path, required=True)
     export.add_argument('--series', required=True)
     store(export)
+    binding = dicom.add_parser('bind-series')
+    binding.add_argument('--manifest', type=Path, required=True)
+    binding.add_argument('--series', required=True)
+    binding.add_argument('--case', required=True)
+    binding.add_argument('--reviewer', required=True)
+    binding.add_argument('--reason', required=True)
+    store(binding)
     review = dicom.add_parser('import-review')
     review.add_argument('--manifest', type=Path, required=True)
     review.add_argument('--review', type=Path, required=True)
@@ -225,6 +232,20 @@ def execute(args):
                        'measurement_eligible_count': sum(s['measurement_eligible'] for s in manifest['series']),
                        'instance_count': len(manifest['instances']), 'conflict_count': len(manifest['conflicts'])}
         manifest = read_json(args.manifest)
+        if args.action in ('bind-series', 'import-review'):
+            from .inventory import _linked
+            content = canonical_json_bytes(manifest)
+            manifest_hash = sha256_digest(content)
+            registered = root.absolute() / 'imaging' / 'manifests' / (manifest_hash.split(':')[1] + '.json')
+            if (not registered.is_file() or any(_linked(p) for p in (registered, *registered.parents))
+                    or registered.read_bytes() != content):
+                raise ValueError('registered inspection manifest from this store is required')
+        if args.action == 'bind-series':
+            from .imaging_history import bind_series
+            source = import_review(review_template(manifest, args.series), manifest)
+            binding_id = bind_series(AppendOnlyJsonlLedger(root / 'ledger.jsonl'), args.case, source,
+                                     reviewer=args.reviewer, reason=args.reason, manifest_hash=manifest_hash)
+            return 0, {'binding_id': binding_id, 'status': 'USER_REVIEWED_SOURCE_BINDING'}
         if args.action == 'export':
             review = review_template(manifest, args.series)
             path = save_json(root, 'imaging/templates', review)
@@ -232,17 +253,22 @@ def execute(args):
             return 0, {'path': str(path), 'manifest': str(args.manifest.resolve()), 'slicer_script': str(script),
                        'instruction': 'Use load_series and export_review in 3D Slicer; then dicom import-review.',
                        'clinical_validation': 'NOT_VALIDATED'}
-        result = import_review(read_json(args.review), manifest, review_dir=args.review.parent)
-        result.update(reviewer=args.reviewer, review_status=args.review_status,
+        from .imaging_history import record_import, source_binding
+        if not args.reviewer.strip():
+            raise ValueError('nonempty reviewer is required')
+        ledger = AppendOnlyJsonlLedger(root / 'ledger.jsonl')
+        review_bytes = args.review.read_bytes()
+        review = json.loads(review_bytes.decode('utf-8'))
+        binding_id = source_binding(ledger, args.case, review, manifest_hash)
+        result = import_review(review, manifest, review_dir=args.review.parent)
+        result.update(reviewer=args.reviewer.strip(), review_status=args.review_status,
                       review_status_provenance='USER_DECLARED_NOT_CREDENTIAL_VERIFIED')
         path = save_json(root, 'imaging/reviews', result)
         review_id = path.stem
-        from .imaging_history import record_import
-        record_import(AppendOnlyJsonlLedger(root / 'ledger.jsonl'), args.case, review_id, result,
-                      sha256_digest(args.review.read_bytes()), replaces=args.replaces_review_id,
-                      reason=args.amendment_reason)
+        record_import(ledger, args.case, review_id, result, sha256_digest(review_bytes),
+                      replaces=args.replaces_review_id, reason=args.amendment_reason, binding_id=binding_id)
         return 0, {'path': str(path), 'review_id': review_id, 'measurement_count': len(result['measurements']),
-                   'clinical_validation': 'NOT_VALIDATED'}
+                   'source_binding_id': binding_id, 'clinical_validation': 'NOT_VALIDATED'}
     if args.command == 'compare-runs':
         from .comparison import compare_results
         from .tribunal import TribunalService

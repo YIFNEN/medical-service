@@ -42,10 +42,35 @@ class ExtendedCliTests(unittest.TestCase):
             review['markups'] = [{'kind':'line', 'coordinate_system':'LPS', 'points':[[0,0,0],[3,4,0]]}]
             path = store / 'manual-review.json'
             path.write_text(json.dumps(review))
-            _, result = self.invoke(['dicom', 'import-review', '--manifest', inspection['path'], '--review', str(path),
-                                     '--case', 'case', '--reviewer', 'local-user', '--store', str(store)])
+            ledger = AppendOnlyJsonlLedger(store / 'ledger.jsonl')
+            args = ['dicom', 'import-review', '--manifest', inspection['path'], '--review', str(path),
+                    '--case', 'case', '--reviewer', 'local-user', '--store', str(store)]
+            with self.assertRaisesRegex(ValueError, 'reviewed source binding'):
+                self.invoke(args)
+            self.assertFalse(ledger.records())
+            bind = ['dicom', 'bind-series', '--manifest', inspection['path'], '--series', first.SeriesInstanceUID,
+                    '--case', 'case', '--reviewer', 'local-user', '--reason', 'confirmed case and scan',
+                    '--store', str(store)]
+            _, binding = self.invoke(bind)
+            _, repeated_binding = self.invoke(bind)
+            self.assertEqual(repeated_binding, binding)
+            with self.assertRaisesRegex(ValueError, 'another case'):
+                self.invoke(['other-case' if x == 'case' else x for x in bind])
+            with self.assertRaisesRegex(ValueError, 'reviewed source binding'):
+                self.invoke(['other-case' if x == 'case' else x for x in args])
+            with self.assertRaisesRegex(ValueError, 'nonempty reviewer'):
+                self.invoke([' ' if x == 'local-user' else x for x in args])
+            altered_manifest = store / 'altered-manifest.json'
+            manifest = json.loads(Path(inspection['path']).read_text(encoding='utf-8'))
+            manifest['instances'][0]['date'] = '20991231'
+            altered_manifest.write_text(json.dumps(manifest), encoding='utf-8')
+            with self.assertRaisesRegex(ValueError, 'registered inspection manifest'):
+                self.invoke([str(altered_manifest) if x == inspection['path'] else x for x in args])
+            self.assertEqual([r['kind'] for r in ledger.records()], ['IMAGING_SERIES_BOUND'])
+            _, result = self.invoke(args)
             self.assertEqual(result['measurement_count'], 1)
-            context = _latest_context(AppendOnlyJsonlLedger(store / 'ledger.jsonl'), 'case')
+            self.assertEqual(ledger.records()[-1]['payload']['source_binding_id'], binding['binding_id'])
+            context = _latest_context(ledger, 'case')
             self.assertEqual(context['imaging_reviews'][0]['measurements'][0]['value'], 5.0)
             measurement = context['imaging_reviews'][0]['measurements'][0]
             self.assertTrue(measurement['fact_id'].startswith('imaging-observation-'))

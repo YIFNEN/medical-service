@@ -25,7 +25,7 @@ from .evidence import (
 )
 from .extraction import ClinicalExtractionService, ExtractionResult, extraction_batches
 from .intake import FileIntakeResult, FileIntakeService, ImageRole, InputKind, pdf_text_blocks
-from .ledger import AppendOnlyJsonlLedger, ContentAddressedStore, deterministic_id
+from .ledger import AppendOnlyJsonlLedger, ContentAddressedStore, canonical_json_bytes, deterministic_id
 from .providers import build_live_gateways
 from .reasoning import ReasoningService, SyntheticReasoner
 from .reporting import ReportRenderer
@@ -626,10 +626,21 @@ def main(argv: Sequence[str] | None = None) -> int:
                 raise ValueError('run budget is pinned; create a new approved run')
             if args.codex_calls is not None and args.codex_calls != estimate.codex_calls:
                 raise ValueError('Codex attempt limit is pinned; create a new run')
+            case_id = workflow_manifest['case_id']
+            pinned_context = workflow_manifest['patient_context']
+            source_context = pinned_context
+            if pinned_context.get('analysis_input', {}).get('mode') == 'CLINICIAN_BLIND':
+                from .blinding import blind_source_context
+                source_context = blind_source_context(root, args.run_id, case_id)
+            try:
+                latest_context = _latest_context(ledger, case_id)
+            except KeyError:
+                raise ValueError('reviewed case input is unavailable; verify the source and create a new run') from None
+            if canonical_json_bytes(latest_context) != canonical_json_bytes(source_context):
+                raise ValueError('case input changed since approval; review it and create a new run')
             limit = workflow_manifest["sources"][0]["limit"]
             result = ResearchWorkflow(root, build_live_gateways(registry, backend=estimate.backend), _literature_retriever(limit), registry).run(
-                run_id=args.run_id, case_id=workflow_manifest["case_id"],
-                patient_context=workflow_manifest["patient_context"],
+                run_id=args.run_id, case_id=case_id, patient_context=pinned_context,
                 question_set=QuestionSet.model_validate_json(json.dumps(workflow_manifest["question_set"])),
                 estimate=estimate.approve(),
                 evidence_limit=workflow_manifest["evidence_limit"],

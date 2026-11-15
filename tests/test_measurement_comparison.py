@@ -16,6 +16,8 @@ def metric(value=5.0):
 def test_manual_pairs_compare_values_and_never_scanner_coordinates():
     from medic.measurement_comparison import compare_measurements
     before, after = metric(), metric(7.0)
+    before['source_conditions'] = {'dates': ['20000101']}
+    after['source_conditions'] = {'dates': ['20010101']}
     before['points_lps'] = [[100, 0, 0], [105, 0, 0]]
     after['points_lps'] = [[-90, 0, 0], [-83, 0, 0]]
     result = compare_measurements(before, after)
@@ -52,15 +54,49 @@ def test_incompatible_measurements_cannot_claim_change(field, value):
 def test_unknown_conditions_are_not_equivalent():
     from medic.measurement_comparison import compare_measurements
     before, after = metric(), metric(6.0)
+    before['source_conditions'] = {'dates': ['20000101']}
+    after['source_conditions'] = {'dates': ['20010101']}
     for item in (before, after):
         item['metadata']['acquisition']['weight_bearing'] = 'UNKNOWN'
     result = compare_measurements(before, after)
     assert result['comparability'] == 'LIMITED_UNKNOWN'
     assert result['numeric_difference'] is None
     before, after = metric(), metric(6.0)
+    before['source_conditions'] = {'dates': ['20000101']}
+    after['source_conditions'] = {'dates': ['20010101']}
     for item in (before, after):
         item['metadata']['landmarks'] = ['UNKNOWN', 'UNKNOWN']
     assert compare_measurements(before, after)['comparability'] == 'LIMITED_UNKNOWN'
+
+
+@pytest.mark.parametrize('after_conditions,status,delta,reason', [
+    ({'dates': ['20000101']}, 'INCOMPATIBLE', None, 'same date'),
+    ({'dates': ['19990101']}, 'INCOMPATIBLE', None, 'before date is later'),
+    ({}, 'LIMITED_UNKNOWN', None, 'unknown: source date'),
+    ({'dates': ['20000101', '20010101']}, 'LIMITED_UNKNOWN', None, 'unknown: source date'),
+    ({'dates': ['20010230']}, 'LIMITED_UNKNOWN', None, 'unknown: source date'),
+    ({'dates': ['20010101']}, 'COMPARABLE', 2.0, None),
+])
+def test_compare_cli_requires_distinct_ordered_source_dates(
+        tmp_path, capsys, after_conditions, status, delta, reason):
+    import json
+    from medic.cli import main
+    from medic.imaging_history import record_import
+    from medic.ledger import AppendOnlyJsonlLedger
+
+    ledger = AppendOnlyJsonlLedger(tmp_path / 'ledger.jsonl')
+    record_import(ledger, 'case', 'baseline', {'study_uid': 'study-a', 'series_uid': 'series-a',
+        'conditions': {'dates': ['20000101']}, 'measurements': [metric()]}, 'sha256:baseline')
+    record_import(ledger, 'case', 'followup', {'study_uid': 'study-b', 'series_uid': 'series-b',
+        'conditions': after_conditions, 'measurements': [metric(7.0)]}, 'sha256:followup')
+    assert main(['dicom', 'compare-measurements', '--case', 'case', '--before-review', 'baseline',
+                 '--before-measurement', 'm1', '--after-review', 'followup', '--after-measurement', 'm1',
+                 '--store', str(tmp_path)]) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result['comparability'] == status
+    assert result['numeric_difference'] == delta
+    if reason is not None:
+        assert reason in ' '.join(result['reasons'])
 
 
 def test_withdrawn_or_replaced_review_cannot_be_compared(tmp_path):

@@ -73,6 +73,35 @@ def test_recursive_derived_lineage_and_imaging_projection(tmp_path):
     assert 'PLANE COMMENTARY LEAK' not in json.dumps(visible)
 
 
+@pytest.mark.parametrize('status', ['withdrawn', 'UNREVIEWED'])
+def test_blind_approval_requires_active_reviewed_imaging(tmp_path, status):
+    from medic.blinding import create_blind_input
+    from medic.cli import _latest_context
+    from medic.imaging_history import record_import
+
+    ledger = AppendOnlyJsonlLedger(tmp_path / 'ledger.jsonl')
+    ledger.append_once('HIGH_IMPACT_FACTS_CONFIRMED', 'context', {
+        'case_id': 'case-1', 'context': {'fact_details': [], 'confirmed_facts': []},
+    })
+    record_import(ledger, 'case-1', 'review', {
+        'study_uid': 'study', 'series_uid': 'series',
+        'review_status': 'USER_REVIEWED' if status == 'withdrawn' else status,
+        'review_status_provenance': 'USER_DECLARED', 'measurements': [{'value': 5.0, 'units': 'mm'}],
+        'segmentations': [], 'interpretation': 'manual', 'unmarked_tissue': 'NOT_EVALUATED',
+    }, 'sha256:source')
+    if status == 'withdrawn':
+        ledger.append_once('IMAGING_REVIEW_WITHDRAWN', 'case-1:review', {
+            'case_id': 'case-1', 'review_id': 'review',
+        })
+    approved = {**approval(), 'imaging_review_ids': ['review']}
+
+    with pytest.raises(ValueError, match='active reviewed imaging'):
+        create_blind_input(tmp_path, 'blind', 'case-1', _latest_context(ledger, 'case-1'), {}, approved)
+
+    assert not (tmp_path / 'withheld-inputs').exists()
+    assert not (tmp_path / 'runs').exists()
+
+
 def test_comparison_requires_seal_and_same_case_input_and_detects_tampering(tmp_path):
     from medic.blinding import create_blind_input, seal_result, comparison_input
     from medic.config import ModelRegistry

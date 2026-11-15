@@ -3,8 +3,11 @@ import json
 import re
 import unicodedata
 from datetime import UTC, datetime
+from functools import partial
 from pathlib import Path
 from typing import Literal
+
+from pydantic import Field
 
 from .extended_cli import save_json, run_id as validate_run_id
 from .ledger import AppendOnlyJsonlLedger, canonical_json_bytes, sha256_digest
@@ -19,6 +22,7 @@ class BlindApproval(StrictFrozenModel):
     questions_reviewed: bool
     profile_items: tuple[str, ...] = ()
     imaging_review_ids: tuple[str, ...] = ()
+    include_case_questions: bool = Field(default=True, exclude_if=lambda value: value is True)
 
 
 def _ledger(root, run_id):
@@ -68,6 +72,14 @@ def _withheld(root, snapshot):
     return value
 
 
+def blind_source_context(root, run_id, case_id):
+    """Read the pinned, unfiltered context for local resume validation."""
+    snapshot = _snapshot(root, run_id)
+    if snapshot is None or snapshot['case_id'] != case_id:
+        raise ValueError('a same-case blind snapshot is required')
+    return _withheld(root, snapshot)['source_context']
+
+
 def create_blind_input(root, run_id, case_id, context, questions, approval):
     approval = BlindApproval.model_validate_json(json.dumps(approval))
     if approval.case_id != case_id or not approval.questions_reviewed or not approval.reviewer.strip() or not approval.reason.strip():
@@ -113,8 +125,12 @@ def create_blind_input(root, run_id, case_id, context, questions, approval):
                     if set(item.get('fact_ids', ())) - eligible_ids:
                         raise ValueError('profile refers to withheld facts')
                     visible_profile.setdefault(dimension, []).append(item)
+    reviewed_imaging = [review for review in context.get('imaging_reviews', ())
+                        if review.get('review_status') in ('USER_REVIEWED', 'EXPERT_REVIEWED')]
+    if set(approval.imaging_review_ids) - {review['review_id'] for review in reviewed_imaging}:
+        raise ValueError('blind approval must reference active reviewed imaging')
     imaging = []
-    for review in context.get('imaging_reviews', ()):
+    for review in reviewed_imaging:
         if review.get('review_id') in approval.imaging_review_ids:
             projected = {key: review[key] for key in ('review_id', 'review_status') if key in review}
             projected['measurements'] = [_project_measurement(m) for m in review.get('measurements', ())]
@@ -134,9 +150,10 @@ def create_blind_input(root, run_id, case_id, context, questions, approval):
                                 'review_inputs': [{'event_id': r.get('event_id'), 'version': r.get('version'),
                                                   'review': r['review']} for r in case.get('review_inputs', ())
                                                   if r['review']['fact_id'] in eligible_ids]}}
-    for key in ('typed_questions', 'question_evaluations', 'question_version'):
-        if key in context:
-            visible[key] = context[key]
+    if approval.include_case_questions:
+        for key in ('typed_questions', 'question_evaluations', 'question_version'):
+            if key in context:
+                visible[key] = context[key]
     if visible.get('typed_questions'):
         from .questions import evaluate_questions
         from .question_runtime import available_references
@@ -186,10 +203,16 @@ def _check_hidden(hidden, text):
             raise ValueError('withheld content detected; review input separation locally')
 
 
-def assert_no_leak(root, run_id, text):
+def blind_leak_check(root, run_id):
     snapshot = _snapshot(root, run_id)
     if snapshot is not None:
-        _check_hidden(_withheld(root, snapshot), text)
+        return partial(_check_hidden, _withheld(root, snapshot))
+
+
+def assert_no_leak(root, run_id, text):
+    check = blind_leak_check(root, run_id)
+    if check is not None:
+        check(text)
 
 
 def seal_result(root, result):

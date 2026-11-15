@@ -1,7 +1,10 @@
 from pathlib import Path
+import json
 import tempfile
 import unittest
 from unittest.mock import patch
+
+import pytest
 
 from medic.config import ModelRegistry
 from medic.providers import ApprovedGateway, RecordedGateway
@@ -92,3 +95,51 @@ class WorkflowResumeTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, 'inputs differ'):
                     workflow.run(**{**args, 'patient_context': {'confirmed_facts': ['changed']}},
                                  run_id='changed', fulltext_limit=1, reuse_search_from='baseline')
+
+
+@pytest.mark.parametrize('mode', ['standard', 'clinician-blind'])
+@pytest.mark.parametrize('withdraw', [False, True], ids=['amendment', 'withdrawal'])
+def test_cli_resume_rejects_case_changes_before_provider_setup(tmp_path, monkeypatch, mode, withdraw):
+    from medic.cli import main
+    from medic.ledger import AppendOnlyJsonlLedger
+    from medic.workflow import ResearchRunFailed
+    from tests.test_blinding import approval
+
+    ledger = AppendOnlyJsonlLedger(tmp_path / 'ledger.jsonl')
+    fact = {'fact_id': 'source-fact', 'fact_key': 'source_note', 'value': 'original private synthetic note',
+            'source_locators': ['synthetic|text|0-10'], 'user_confirmed': True}
+    ledger.append_once('HIGH_IMPACT_FACTS_CONFIRMED', 'initial',
+                       {'case_id': 'case-1', 'context': {'fact_details': [fact]}})
+    raw = RecordedGateway('openai', 'synthetic-codex', [plan('openai')] * 3)
+    raw.backend = 'codex'
+    gateways = {'openai': ApprovedGateway(raw)}
+    monkeypatch.setattr('medic.cli.build_live_gateways', lambda *args, **kwargs: gateways)
+    execution = ['--store', str(tmp_path), '--backend', 'codex', '--codex-calls', '3', '--approve-transmission']
+    deliberate = ['deliberate', 'case-1', '--run-id', 'paused', '--mode', mode, *execution]
+    if mode == 'clinician-blind':
+        review = tmp_path / 'approval.json'
+        review.write_text(json.dumps(approval()), encoding='utf-8')
+        deliberate += ['--blind-review', str(review)]
+    resume = ['resume', 'paused', *execution]
+    with pytest.raises(ResearchRunFailed, match='PermissionError'):
+        main(deliberate)
+    assert raw.call_count == 3
+    assert all((fact['value'] in prompt) == (mode == 'standard') for prompt in raw.prompts)
+    run_path = tmp_path / 'runs' / 'paused' / 'ledger.jsonl'
+    paused = run_path.read_bytes()
+    ledger.append_once('SOURCE_DECISION', 'other-case',
+                       {'case_id': 'case-other', 'fact_id': 'source-fact', 'value': None, 'withdraw': True})
+    with pytest.raises(ResearchRunFailed, match='PermissionError'):
+        main(resume)
+    assert raw.call_count == 3
+    assert run_path.read_bytes() == paused
+
+    ledger.append_once('SOURCE_DECISION', 'latest',
+                       {'case_id': 'case-1', 'fact_id': 'source-fact', 'withdraw': withdraw,
+                        'value': None if withdraw else 'corrected private synthetic note'})
+    with patch('medic.cli.build_live_gateways', side_effect=AssertionError('stale input reached gateway setup')) as build_gateways:
+        with pytest.raises(ValueError, match='case input changed.*new run'):
+            main([*resume, '--approve-search'])
+        build_gateways.assert_not_called()
+    assert raw.call_count == 3
+    assert run_path.read_bytes() == paused

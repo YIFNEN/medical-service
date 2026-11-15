@@ -14,6 +14,8 @@ class ImagingAmendmentTests(unittest.TestCase):
             def save(identifier, value=review, **kwargs):
                 return record_import(ledger, 'case', identifier, value, 'sha256:source', **kwargs)
             save('old')
+            with self.assertRaisesRegex(ValueError, 'explicit replacement'):
+                save('unlinked')
             save('new', replaces='old', reason='corrected point')
             before = len(ledger.records())
             save('new', replaces='old', reason='corrected point')

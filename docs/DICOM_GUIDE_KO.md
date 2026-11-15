@@ -10,10 +10,12 @@
 medic inventory "C:\example-data\medical" --store .medic/personal
 medic dicom inspect --inventory INVENTORY_JSON --store .medic/personal
 medic dicom export --manifest MANIFEST_JSON --series SERIES_UID --store .medic/personal
+medic dicom bind-series --manifest MANIFEST_JSON --series SERIES_UID --case MY-ANKLE-001 --reviewer USER_NAME --reason "사례 및 시리즈 확인" --store .medic/personal
 medic dicom import-review --manifest MANIFEST_JSON --review REVIEW_JSON --case MY-ANKLE-001 --reviewer USER_NAME --store .medic/personal
 ```
 
 `export`는 검수 템플릿과 Slicer 스크립트 경로를 반환하며 GUI를 자동 실행하지 않습니다. 계측·수동 영역에는 모델 검토에 사용할 고유 `fact_id`가 부여됩니다. 기본 `USER_REVIEWED`와 `EXPERT_REVIEWED`는 구별하지만 전문가 자격은 사용자가 선언한 것이며 시스템이 검증하지 않습니다. 미검수 결과는 근거 ID로 인정하지 않습니다.
+`bind-series`는 로컬 검수자의 사례 연결 확인을 기록합니다. 가져올 때 동일 사례, 검사·시리즈, 원본 해시와 해당 저장소에 등록된 검사 manifest가 모두 일치해야 합니다.
 
 ```python
 from pathlib import Path
