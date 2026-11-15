@@ -409,6 +409,19 @@ $DecisionBudget = [double](Read-Host '별도로 승인한 판단 예산 USD')
 기존 사례 질문이 판독문이나 가림 대상 사실을 참조하면 가림 승인 JSON에 `"include_case_questions": false`를 설정하고,
 별도로 검수한 중립 질문을 `--question`으로 전달한다. `questions_reviewed`를 `true`로 설정하기 전에 질문과 계측의 자유 입력 메타데이터까지 검토한다.
 기존 사례 질문과 완료 보고서는 보존된다. 철회되거나 현재 검수 목록에 없는 영상 review ID는 실행 전에 거부한다.
+
+`$BlindReview`에 실제 검수한 승인 파일 경로를, `$NeutralQuestion`에 검수한 중립 질문을 지정한다.
+이 설정으로 외부 호출 전에 보이는 사례 입력을 로컬에서 확인할 수 있다.
+
+```powershell
+& $Python -X utf8 -m medic deliberate $Case --mode clinician-blind --blind-review $BlindReview `
+  --preview-blind --question $NeutralQuestion --store $Store
+```
+
+`path`의 JSON은 가림 적용 후 사례 입력과 질문을 담는다. `input_sha256`은 같은 파일의 해시다.
+`visible_fact_count`, `measurement_count`, `withheld_fact_count`, `paid_calls_made: 0`을 확인한다.
+검수한 입력으로 전송을 승인할 때 실행 명령에 `--expected-blind-input-sha256`와 확인한 해시를 함께 지정하면 입력 변경을 호출 전에 차단한다.
+가림 미리보기에는 외부 호출 뒤 생성될 검색식이나 문헌 결과가 포함되지 않는다. 검색식은 별도 검수한다.
 기관 제약·의료진 권고·전언·과거 AI 결론을 본인 경험이나 관찰로 재분류하지 않는다.
 
 ```powershell

@@ -8,12 +8,13 @@ import json
 import socket
 import unicodedata
 from collections import Counter
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from medic.blinding import assert_no_leak, comparison_input, create_blind_input, seal_result
-from medic.cli import _render_completed
+from medic.cli import _render_completed, main
 from medic.config import ModelRegistry
 from medic.evidence import OfficialLiteratureRetriever
 from medic.ledger import AppendOnlyJsonlLedger, canonical_json_bytes, sha256_digest
@@ -191,6 +192,97 @@ def test_explicit_opt_out_keeps_active_case_questions_local(tmp_path):
     hidden_file = tmp_path / 'withheld-inputs' / (snapshot['withheld_sha256'].removeprefix('sha256:') + '.json')
     withheld = json.loads(hidden_file.read_bytes())
     assert withheld['source_context'] == context
+
+
+def test_deliberate_preview_blind_writes_only_the_visible_input(tmp_path, monkeypatch, capsys):
+    context = source_context()
+    context['typed_questions'][1]['text'] = HIDDEN
+    approval = {**blind_fixtures.approval(), 'include_case_questions': False,
+                'imaging_review_ids': ['reviewed-image']}
+    review = tmp_path / 'approval.json'
+    review.write_text(json.dumps(approval), encoding='utf-8')
+    ledger_path = tmp_path / 'ledger.jsonl'
+    AppendOnlyJsonlLedger(ledger_path).append_once('SYNTHETIC_INPUT', 'case-1', {})
+    before = ledger_path.read_bytes()
+    monkeypatch.setattr('medic.cli._latest_context', lambda *args: context)
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError('blind input preview must not build a gateway or search retriever')
+
+    monkeypatch.setattr('medic.cli.build_live_gateways', forbidden)
+    monkeypatch.setattr('medic.cli._literature_retriever', forbidden)
+    question = 'What do the reviewed observations establish?'
+    invocation = ['deliberate', 'case-1', '--mode', 'clinician-blind', '--preview-blind',
+                  '--blind-review', str(review), '--question', question, '--store', str(tmp_path)]
+
+    assert main(invocation) == 0
+    summary = json.loads(capsys.readouterr().out)
+    assert summary['paid_calls_made'] == 0
+    assert summary['visible_fact_count'] == 1
+    assert summary['measurement_count'] == 1
+    assert summary['withheld_fact_count'] == 1
+    assert summary['input_sha256'].startswith('sha256:')
+    path = Path(summary['path'])
+    assert path.resolve().is_relative_to(tmp_path)
+    payload = path.read_text(encoding='utf-8')
+    preview = json.loads(payload)
+    visible = preview['visible_context']
+    assert not {'typed_questions', 'question_evaluations', 'question_version'}.intersection(visible)
+    assert [fact['fact_id'] for fact in visible['fact_details']] == ['direct']
+    assert visible['imaging_reviews'][0]['measurements'][0]['value'] == 5
+    assert preview['questions']['custom_question'] == question
+    assert HIDDEN not in payload and NESTED_NOTE not in payload and 'unreviewed-page.png' not in payload
+    assert main(invocation) == 0
+    repeated_summary = json.loads(capsys.readouterr().out)
+    assert repeated_summary['input_sha256'] == summary['input_sha256']
+    assert Path(repeated_summary['path']).read_text(encoding='utf-8') == payload
+    assert ledger_path.read_bytes() == before
+    assert not (tmp_path / 'runs').exists()
+    assert not (tmp_path / 'withheld-inputs').exists()
+
+
+def test_deliberate_preview_blind_rejects_codex_execution_flags(tmp_path, monkeypatch, capsys):
+    def forbidden(*args, **kwargs):
+        raise AssertionError('conflicting preview and execution flags reached gateway setup')
+
+    monkeypatch.setattr('medic.cli.build_live_gateways', forbidden)
+    review = tmp_path / 'approval.json'
+    review.write_text(json.dumps(blind_fixtures.approval()), encoding='utf-8')
+    with pytest.raises((ValueError, SystemExit)) as error:
+        main(['deliberate', 'case-1', '--mode', 'clinician-blind', '--preview-blind',
+              '--blind-review', str(review), '--backend', 'codex', '--codex-calls', '1',
+              '--approve-transmission', '--store', str(tmp_path)])
+    if isinstance(error.value, SystemExit):
+        assert error.value.code == 2
+        message = capsys.readouterr().err
+    else:
+        message = str(error.value)
+    assert '--preview-blind' in message and '--codex-calls' in message
+    assert 'unrecognized arguments' not in message
+    assert not (tmp_path / 'runs').exists()
+
+
+def test_deliberate_rejects_inputs_changed_after_blind_preview(tmp_path, monkeypatch, capsys):
+    context = source_context()
+    approval = tmp_path / 'approval.json'
+    approval.write_text(json.dumps(blind_fixtures.approval()), encoding='utf-8')
+    monkeypatch.setattr('medic.cli._latest_context', lambda *args: context)
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError('a stale blind input hash must be rejected before gateway setup')
+
+    monkeypatch.setattr('medic.cli.build_live_gateways', forbidden)
+    base = ['deliberate', 'case-1', '--mode', 'clinician-blind', '--blind-review', str(approval),
+            '--store', str(tmp_path), '--question', 'What does the revised observation establish?']
+    assert main([*base, '--preview-blind']) == 0
+    reviewed_hash = json.loads(capsys.readouterr().out)['input_sha256']
+    context['fact_details'][0]['value'] = 'revised synthetic observation'
+
+    with pytest.raises(ValueError, match='hash|input changed|preview'):
+        main([*base, '--run-id', 'stale', '--backend', 'codex', '--codex-calls', '1',
+              '--approve-transmission', '--expected-blind-input-sha256', reviewed_hash])
+    assert not (tmp_path / 'runs').exists()
+    assert not (tmp_path / 'withheld-inputs').exists()
 
 
 @pytest.mark.parametrize('phrase', [HIDDEN, KOREAN, '의료진의 "가려진" 장기 예후 판단입니다',

@@ -80,7 +80,7 @@ def blind_source_context(root, run_id, case_id):
     return _withheld(root, snapshot)['source_context']
 
 
-def create_blind_input(root, run_id, case_id, context, questions, approval):
+def _project_blind_input(case_id, context, questions, approval):
     approval = BlindApproval.model_validate_json(json.dumps(approval))
     if approval.case_id != case_id or not approval.questions_reviewed or not approval.reviewer.strip() or not approval.reason.strip():
         raise ValueError('explicit same-case question/visibility review required')
@@ -159,9 +159,25 @@ def create_blind_input(root, run_id, case_id, context, questions, approval):
         from .question_runtime import available_references
         visible['question_evaluations'] = [r.model_dump(mode='json') for r in evaluate_questions(
             visible['typed_questions'], available=available_references(visible))]
-    hidden_bundle = {'version': 'medic-withheld-input/1', 'case_id': case_id, 'run_id': run_id,
-                     'facts': hidden, 'source_context': context, 'approval': approval.model_dump(mode='json')}
-    _check_hidden(hidden_bundle, json.dumps({'context': visible, 'questions': questions}, ensure_ascii=False))
+    withheld = {'facts': hidden, 'source_context': context, 'approval': approval.model_dump(mode='json')}
+    scope = {'visible_context': visible, 'questions': questions}
+    _check_hidden(withheld, json.dumps({'context': visible, 'questions': questions}, ensure_ascii=False))
+    return scope, withheld
+
+
+def preview_blind_input(case_id, context, questions, approval):
+    """Compute the same clinical projection as execution without creating a run."""
+    scope, withheld = _project_blind_input(case_id, context, questions, approval)
+    return scope, len(withheld['facts'])
+
+
+def create_blind_input(root, run_id, case_id, context, questions, approval, *, expected_visible_sha256=None):
+    scope, withheld = _project_blind_input(case_id, context, questions, approval)
+    if (expected_visible_sha256 is not None
+            and sha256_digest(canonical_json_bytes(scope)) != expected_visible_sha256):
+        raise ValueError('blind input differs from the reviewed preview')
+    visible = scope['visible_context']
+    hidden_bundle = {'version': 'medic-withheld-input/1', 'case_id': case_id, 'run_id': run_id, **withheld}
     hidden_hash = sha256_digest(canonical_json_bytes(hidden_bundle))
     ledger = _ledger(root, run_id)
     existing = _snapshot(root, run_id)

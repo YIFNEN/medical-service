@@ -50,6 +50,27 @@ def test_korean_and_escaped_hidden_input_is_rejected_before_snapshot_or_calls(tm
     assert not ledger.records()
 
 
+def test_blind_scope_hash_matches_projection_and_rejects_input_drift(tmp_path):
+    from medic.blinding import create_blind_input, preview_blind_input
+    from medic.ledger import canonical_json_bytes, sha256_digest
+
+    questions = {'question': 'walking'}
+    scope, withheld_count = preview_blind_input('case-1', context(), questions, approval())
+    assert withheld_count == 1
+    expected = sha256_digest(canonical_json_bytes(scope))
+    edited = context()
+    edited['fact_details'][0]['value'] = 'walking still difficult'
+    with pytest.raises(ValueError, match='blind input differs from the reviewed preview'):
+        create_blind_input(tmp_path, 'blind', 'case-1', edited, questions, approval(),
+                           expected_visible_sha256=expected)
+    assert not (tmp_path / 'withheld-inputs').exists()
+    assert not (tmp_path / 'runs').exists()
+
+    persisted = create_blind_input(tmp_path, 'blind', 'case-1', context(), questions, approval(),
+                                   expected_visible_sha256=expected)
+    assert {k: v for k, v in persisted.items() if k != 'analysis_input'} == scope['visible_context']
+
+
 def test_recursive_derived_lineage_and_imaging_projection(tmp_path):
     from medic.blinding import create_blind_input
     ctx = context()

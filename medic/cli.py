@@ -25,14 +25,14 @@ from .evidence import (
 )
 from .extraction import ClinicalExtractionService, ExtractionResult, extraction_batches
 from .intake import FileIntakeResult, FileIntakeService, ImageRole, InputKind, pdf_text_blocks
-from .ledger import AppendOnlyJsonlLedger, ContentAddressedStore, canonical_json_bytes, deterministic_id
+from .ledger import AppendOnlyJsonlLedger, ContentAddressedStore, canonical_json_bytes, deterministic_id, sha256_digest
 from .providers import build_live_gateways
 from .reasoning import ReasoningService, SyntheticReasoner
 from .reporting import ReportRenderer
 from .research_contracts import EvidenceCard, QuestionSet
 from .tribunal import PROMPT_VERSION, TribunalResult, TribunalService
 from .workflow import ResearchWorkflow
-from .extended_cli import register, execute, budget_arguments, approved_estimate, read_json, run_id
+from .extended_cli import register, execute, budget_arguments, approved_estimate, read_json, run_id, save_json
 from .extended_cli import execution_estimate, execution_requested
 from .settings import add_settings_arguments, settings_from_args, has_settings_override, ProcessingSettings
 
@@ -114,6 +114,8 @@ def _parser() -> argparse.ArgumentParser:
     deliberate.add_argument('--approve-search', action='store_true')
     deliberate.add_argument('--mode', choices=('standard', 'clinician-blind'), default='standard')
     deliberate.add_argument('--blind-review', type=Path)
+    deliberate.add_argument('--preview-blind', action='store_true', help='save the projected case input locally')
+    deliberate.add_argument('--expected-blind-input-sha256', help='require the reviewed preview hash on execution')
     resume.add_argument('--approve-search', action='store_true')
     register(subparsers)
     from .provider_checks import register as register_provider_checks
@@ -556,9 +558,38 @@ def main(argv: Sequence[str] | None = None) -> int:
     elif command == "deliberate":
         registry = ModelRegistry.for_cli()
         settings = settings_from_args(args)
+        questions = QuestionSet.for_comprehensive_review(args.case, args.question)
+        if args.preview_blind:
+            if (execution_requested(args) or args.approve_transmission or args.approve_search
+                    or args.expected_blind_input_sha256):
+                raise ValueError('--preview-blind cannot be combined with --codex-calls or execution approvals')
+            if args.mode != 'clinician-blind' or not args.blind_review:
+                raise ValueError('--preview-blind requires --mode clinician-blind and --blind-review')
+            from .blinding import preview_blind_input
+            scope, withheld_count = preview_blind_input(args.case, _latest_context(ledger, args.case),
+                questions.model_dump(mode='json'), read_json(args.blind_review))
+            visible = scope['visible_context']
+            count = len(questions.domains) + bool(args.question) + len(visible.get('typed_questions', ()))
+            estimate = execution_estimate(args, registry.estimate_research_cost(args.input_tokens, settings=settings,
+                                                                                question_count=count))
+            preview_path = save_json(root, 'blind-previews', scope)
+            print(json.dumps({**_cost_payload(estimate), 'path': str(preview_path),
+                'input_sha256': sha256_digest(canonical_json_bytes(scope)), 'question_count': count,
+                'visible_fact_count': len(visible['fact_details']), 'withheld_fact_count': withheld_count,
+                'measurement_count': sum(len(r['measurements']) for r in visible['imaging_reviews']),
+                'network_calls_made': 0}, ensure_ascii=False, sort_keys=True))
+            return 0
+        if args.expected_blind_input_sha256 and (args.mode != 'clinician-blind' or not execution_requested(args)):
+            raise ValueError('--expected-blind-input-sha256 requires clinician-blind execution')
+        blind_review = None
+        if args.mode == 'clinician-blind' and execution_requested(args):
+            if not args.blind_review:
+                raise ValueError('clinician-blind requires --blind-review with reviewed input visibility')
+            blind_review = read_json(args.blind_review)
         from .questions import CaseQuestionService
         active = CaseQuestionService(ledger).load(args.case).active
-        count = 7 + bool(args.question) + (len(active.bundle.questions) if active else 0)
+        include_case_questions = not isinstance(blind_review, dict) or blind_review.get('include_case_questions', True)
+        count = len(questions.domains) + bool(args.question) + (len(active.bundle.questions) if active and include_case_questions else 0)
         estimate = execution_estimate(args, registry.estimate_research_cost(args.input_tokens, settings=settings, question_count=count))
         if not execution_requested(args):
             print(json.dumps({**_cost_payload(estimate), 'processing_settings': settings.model_dump(mode='json'),
@@ -567,17 +598,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 2
         context = _latest_context(ledger, args.case)
         estimate = approved_estimate(args, estimate)
-        gateways = build_live_gateways(registry, backend=estimate.backend)
-        questions = QuestionSet.for_comprehensive_review(args.case, args.question)
         if args.mode == 'clinician-blind':
-            if not args.blind_review:
-                raise ValueError('clinician-blind requires --blind-review with reviewed input visibility')
             from .blinding import create_blind_input
             args.run_id = args.run_id or 'research-run-' + uuid.uuid4().hex
             context = create_blind_input(root, args.run_id, args.case, context,
-                questions.model_dump(mode='json'), read_json(args.blind_review))
+                questions.model_dump(mode='json'), blind_review,
+                expected_visible_sha256=args.expected_blind_input_sha256)
         elif args.blind_review:
             raise ValueError('--blind-review requires --mode clinician-blind')
+        gateways = build_live_gateways(registry, backend=estimate.backend)
         result = ResearchWorkflow(root, gateways, _literature_retriever(settings.max_results), registry).run(
             run_id=args.run_id, case_id=args.case, patient_context=context,
             question_set=questions, estimate=estimate, settings=settings,
